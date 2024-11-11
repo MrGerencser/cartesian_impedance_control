@@ -1,4 +1,15 @@
 # cartesian_impedance_control
+
+### Usage for Othopedic Drilling
+    ros2 run cartesian_impedance_control user_input_client
+    ros2 run robot_trajectory_logger robot_trajectory_logger
+    #3 --> #1: Free float is aktiviert und du kannst so positionieren wie du möchtest.
+    #4 --> #1: Pose wird gehalten und orientierung angepasst zum Bohren
+    #5 --> #1: K angepasst in z-richtung. Kannst nun Bohren und wird bei accel threshold von 0.1 stoppen
+    #6 --> #1: activate logging
+    START DRILLING
+    #6 --> #2: stop drilling wehn you're done
+    
 ### ROS2 cartesian_impedance_controller from Pd|Z
 
 Prerequisites:

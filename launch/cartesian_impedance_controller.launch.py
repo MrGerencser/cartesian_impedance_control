@@ -14,7 +14,7 @@
 
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -74,6 +74,12 @@ def generate_launch_description():
                               fake_sensor_commands_parameter_name: fake_sensor_commands,
                               use_rviz_parameter_name: use_rviz
                               }.items(),
+        ),
+
+          # Call the script using ExecuteProcess, assuming it's in the same folder as this launch file
+        ExecuteProcess(
+            cmd=['/home/lucas/franka_ros2_ws/src/admittance_control/launch/set_force_torque_limits.sh'],  # Reference to the shell script in the same folder
+            output='screen',
         ),
 
         Node(

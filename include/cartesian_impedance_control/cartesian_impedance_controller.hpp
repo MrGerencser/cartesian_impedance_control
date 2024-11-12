@@ -142,19 +142,6 @@ public:
                                                                 0,   0,   0,   0,   18,   0,
                                                                 0,   0,   0,   0,   0,   9).finished();
 
-    // Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 250,   0,   0,   0,   0,   0,
-    //                                                             0, 250,   0,   0,   0,   0,
-    //                                                             0,   0, 250,   0,   0,   0,  // impedance stiffness term
-    //                                                             0,   0,   0,  80,   0,   0,
-    //                                                             0,   0,   0,   0,  80,   0,
-    //                                                             0,   0,   0,   0,   0,  10).finished();
-
-    // Eigen::Matrix<double, 6, 6> D =  (Eigen::MatrixXd(6,6) <<  30,   0,   0,   0,   0,   0,
-    //                                                             0,  30,   0,   0,   0,   0,
-    //                                                             0,   0,  30,   0,   0,   0,  // impedance damping term
-    //                                                             0,   0,   0,  18,   0,   0,
-    //                                                             0,   0,   0,   0,  18,   0,
-    //                                                             0,   0,   0,   0,   0,   9).finished();
     double D_gain = 2.05;
     Eigen::Matrix<double, 6, 6> Theta = IDENTITY;
     Eigen::Matrix<double, 6, 6> T = (Eigen::MatrixXd(6,6) <<       10,   0,   0,   0,   0,   0,
@@ -191,7 +178,7 @@ public:
     double alpha = 0.0;
     double time_constant = 0.0;
     bool ramping_active_ = false;
-    double target_stiffness_z_ = 2000;
+    double target_stiffness_z_ = 4000;
     bool position_set_ = false;
     Eigen::Vector3d position_accel_lim;
     bool accel_trigger = false;
@@ -200,14 +187,7 @@ public:
     //Logging
     int outcounter = 0;
     const int update_frequency = 2; //frequency for update outputs
-
-    //Integrator
-    Eigen::Matrix<double, 6, 1> I_error = Eigen::MatrixXd::Zero(6, 1);                      // pose error (6d)
     Eigen::Matrix<double, 6, 1> I_F_error = Eigen::MatrixXd::Zero(6, 1);                    // force error integral
-    Eigen::Matrix<double, 6, 1> integrator_weights = 
-      (Eigen::MatrixXd(6,1) << 75.0, 75.0, 75.0, 75.0, 75.0, 4.0).finished();
-    Eigen::Matrix<double, 6, 1> max_I = 
-      (Eigen::MatrixXd(6,1) << 30.0, 30.0, 30.0, 50.0, 50.0, 2.0).finished();
 
    
   

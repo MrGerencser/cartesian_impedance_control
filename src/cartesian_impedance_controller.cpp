@@ -243,16 +243,6 @@ void CartesianImpedanceController::calculate_accel_pose(double delta_time, doubl
 }
 
 controller_interface::return_type CartesianImpedanceController::update(const rclcpp::Time& /*time*/, const rclcpp::Duration& period) {  
-  // if (outcounter == 0){
-  // std::cout << "Enter 1 if you want to track a desired position or 2 if you want to use free floating with optionally shaped inertia" << std::endl;
-  // std::cin >> mode_;
-  // std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-  // std::cout << "Mode selected" << std::endl;
-  // while (mode_ != 1 && mode_ != 2){
-  //   std::cout << "Invalid mode, try again" << std::endl;
-  //   std::cin >> mode_;
-  // }
-  // }
 
   std::array<double, 49> mass = franka_robot_model_->getMassMatrix();
   std::array<double, 7> coriolis_array = franka_robot_model_->getCoriolisForceVector();
@@ -287,29 +277,23 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   //publishJacobianEE(jacobian_array_EE, jacobian_EE_derivative);
 
   updateJointStates(); 
-
-  
-/*   switch (accel_mode_)
-  {
-    // calculate the desired acceleration over the pose
-  case 0: */
-  // Calculate the acceleration over the z position
   calculate_accel_pose(delta_time, z_position);
 
   // Update previous z position for the next iteration
   previous_z_position_ = z_position;
 
 
-  if (abs(z_acceleration) > 1.0 && c_activation_ && accel_trigger == false) {
+  if (abs(z_acceleration) > 0.5 && c_activation_ && accel_trigger == false) {
     // Start the ramping process if the condition is met
     ramping_active_ = true;
     position_set_ = true;
     position_accel_lim = position;
+    position_accel_lim.z() += 0.01;
     accel_trigger = true;
   }
 
   if (ramping_active_) {
-      time_constant = 0.1; // Adjust this to control the response speed
+      time_constant = 0.001; // Adjust this to control the response speed
       alpha = 1.0 - exp(-period.seconds() / time_constant);
       
       // Gradually increase K.diagonal()[2] towards the target value
@@ -344,9 +328,9 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
 
 
   if (c_activation_){
-    position_d_ = position;
+    position_d_ = position; // for setting orientaiton
     if (position_set_){
-      position_d_ = position_accel_lim;
+      position_d_ = position_accel_lim; // setting breakthrough position
       D_gain = 2.05;
     }
   }
@@ -360,36 +344,17 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   error.tail(3) << error_quaternion.x(), error_quaternion.y(), error_quaternion.z();
   error.tail(3) << -transform.rotation() * error.tail(3);
 
-  Lambda = (jacobian * M.inverse() * jacobian.transpose()).inverse();
-  // Theta = T*Lambda;
-  // F_impedance = -1*(Lambda * Theta.inverse() - IDENTITY) * F_ext;
-  //Inertia of the robot
-  // remove the mode selection
-/*   switch (mode_)
-  {
-  case 1: */
-    
+  Lambda = (jacobian * M.inverse() * jacobian.transpose()).inverse();    
     // correcting D to be critically damped
   D =  D_gain* K.cwiseSqrt() * Lambda.diagonal().cwiseSqrt().asDiagonal();
   
   // when not in drilling mode we use the damoing term to be critically damped and dependant on K
   if (c_activation_) {
-    D.diagonal()[2] = 30;
+    D.diagonal()[2] = 10; // this is in drilling mode
   
   }
 
-  F_impedance = -1 * (D * (jacobian * dq_) + K * error );
-    // balablalba
- /* break;
-
-  case 2: */
-    //Theta = T*Lambda;
-    //F_impedance = -1*(Lambda * Theta.inverse() - IDENTITY) * F_ext;
- /*    break;
-  
-  default:
-    break;
-  } */
+  F_impedance = -1 * (D * (jacobian * dq_) + K * error );     
 
   F_ext = 0.9 * F_ext + 0.1 * O_F_ext_hat_K_M; //Filtering 
   I_F_error += dt * Sf* (F_contact_des - F_ext);

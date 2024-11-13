@@ -178,7 +178,7 @@ public:
     double alpha = 0.0;
     double time_constant = 0.0;
     bool ramping_active_ = false;
-    double target_stiffness_z_ = 4000;
+    double target_stiffness_z_ = 6000;
     bool position_set_ = false;
     Eigen::Vector3d position_accel_lim;
     bool accel_trigger = false;

@@ -283,7 +283,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   previous_z_position_ = z_position;
 
 
-  if (abs(z_acceleration) > 0.5 && c_activation_ && accel_trigger == false) {
+  if (abs(z_acceleration) > 0.35 && c_activation_ && (K.diagonal()[2] == 0.0) && accel_trigger == false) {
     // Start the ramping process if the condition is met
     ramping_active_ = true;
     position_set_ = true;
@@ -293,7 +293,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   }
 
   if (ramping_active_) {
-      time_constant = 0.001; // Adjust this to control the response speed
+      time_constant = 0.01; // Adjust this to control the response speed
       alpha = 1.0 - exp(-period.seconds() / time_constant);
       
       // Gradually increase K.diagonal()[2] towards the target value

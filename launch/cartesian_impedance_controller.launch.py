@@ -78,7 +78,7 @@ def generate_launch_description():
 
           # Call the script using ExecuteProcess, assuming it's in the same folder as this launch file
         ExecuteProcess(
-            cmd=['/home/lucas/franka_ros2_ws/src/admittance_control/launch/set_force_torque_limits.sh'],  # Reference to the shell script in the same folder
+            cmd=['/home/lucas/franka_ros2_ws/src/cartesian_impedance_control/launch/set_force_torque_limits.sh'],  # Reference to the shell script in the same folder
             output='screen',
         ),
 

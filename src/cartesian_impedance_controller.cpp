@@ -160,7 +160,8 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
     }
 
   // Initialize publisher here
-  jacobian_ee_publisher_ = get_node()->create_publisher<messages_fr3::msg::JacobianEE>("jacobian_ee", 10);
+  jacobian_ee_publisher_ = get_node()->create_publisher<messages_fr3::msg::JacobianEE>("/jacobian_ee", 10);
+  dt_Fext_z_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/dt_fext_z", 10);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
   return CallbackReturn::SUCCESS;
@@ -242,6 +243,22 @@ void CartesianImpedanceController::calculate_accel_pose(double delta_time, doubl
     previous_z_acceleration_ = z_acceleration;
 }
 
+void CartesianImpedanceController::calculate_dt_f_ext_z(double delta_time, double F_ext_z) {
+    // Calculate the dt_f_ext_z
+    dt_f_ext_z = (F_ext_z - previous_F_ext_z) / delta_time;
+
+    // Low-pass filter dt_f_ext_z
+    dt_f_ext_z = 0.1 * dt_f_ext_z + 0.9 * previous_dt_F_ext_z;
+
+    // Update previous dt_f_ext_z for the next iteration
+    previous_dt_F_ext_z = dt_f_ext_z;
+
+    // Publish the jointEEState message
+    std_msgs::msg::Float64 dt_f_ext_z_msg;
+    dt_f_ext_z_msg.data = dt_f_ext_z;
+    dt_Fext_z_publisher_->publish(dt_f_ext_z_msg);
+}
+
 controller_interface::return_type CartesianImpedanceController::update(const rclcpp::Time& /*time*/, const rclcpp::Duration& period) {  
 
   std::array<double, 49> mass = franka_robot_model_->getMassMatrix();
@@ -259,31 +276,32 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   double z_position = position.z();
   double previous_z_position = z_position;
 
-  // Static variable to hold the previous Jacobian for derivative calculation
-  static std::array<double, 42> previous_jacobian_EE = jacobian_array_EE;
+  double F_ext_z = O_F_ext_hat_K_M(2);
+  double previous_F_ext_z = F_ext_z;
 
   // Calculate the Jacobian derivative using finite differences
-  std::array<double, 42> jacobian_EE_derivative;
-  double delta_time = 0.001; // Use the actual update period
-
-  for (size_t i = 0; i < jacobian_array_EE.size(); ++i) {
-      jacobian_EE_derivative[i] = (jacobian_array_EE[i] - previous_jacobian_EE[i]) / delta_time;
-  }
+  Eigen::Matrix<double, 6, 7> jacobian_EE_derivative;
   
-  // Update previous Jacobian for next iteration
-  previous_jacobian_EE = jacobian_array_EE;
-
   // Publish the JacobianEE message
   //publishJacobianEE(jacobian_array_EE, jacobian_EE_derivative);
+  
+  updateJointStates();
+    
+  // calculate_z_accel_jacobian(dt, previous_jacobian_EE, jacobian_EE, dq_, previous_dq_);
 
-  updateJointStates(); 
-  calculate_accel_pose(delta_time, z_position);
 
+  // Update previous Jacobian for next iteration
+  // previous_jacobian_EE = jacobian_EE;
+
+  calculate_accel_pose(dt, z_position);
+
+  calculate_dt_f_ext_z(dt,F_ext_z);
+  
   // Update previous z position for the next iteration
   previous_z_position_ = z_position;
 
 
-  if (abs(z_acceleration) > 0.35 && c_activation_ && (K.diagonal()[2] == 0.0) && accel_trigger == false) {
+  if (abs(dt_f_ext_z) > 5500 && c_activation_ && (K.diagonal()[2] == 0.0) && accel_trigger == false) {
     // Start the ramping process if the condition is met
     ramping_active_ = true;
     position_set_ = true;
@@ -323,9 +341,6 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
                         * Eigen::AngleAxisd(rotation_d_target_[1], Eigen::Vector3d::UnitY())
                         * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
   }
-
-  
-
 
   if (c_activation_){
     position_d_ = position; // for setting orientaiton

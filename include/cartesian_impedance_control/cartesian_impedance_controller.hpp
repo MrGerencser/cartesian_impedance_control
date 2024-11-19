@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <thread>
 #include <chrono>         
+#include <vector>
 
 #include "cartesian_impedance_control/user_input_server.hpp"
 
@@ -90,6 +91,8 @@ public:
     rclcpp::Service<messages_fr3::srv::SetPose>::SharedPtr pose_srv_;
     rclcpp::Publisher<messages_fr3::msg::JacobianEE>::SharedPtr jacobian_ee_publisher_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr dt_Fext_z_publisher_; 
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr D_z_publisher_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr VelocityErrorPublisher_;
 
 
     //Functions
@@ -168,7 +171,9 @@ public:
     Eigen::Matrix<double, 6, 1> F_ext = Eigen::MatrixXd::Zero(6, 1);                         // external forces
     Eigen::Matrix<double, 6, 1> F_cmd = Eigen::MatrixXd::Zero(6, 1);                         // commanded contact force
     Eigen::Matrix<double, 7, 1> q_d_nullspace_;
-    Eigen::Matrix<double, 6, 1> error;                                                       // pose error (6d)
+    Eigen::Matrix<double, 6, 1> error;
+    Eigen::Vector3d drill_start_position; 
+    std::vector<double> drill_velocities_;
     double nullspace_stiffness_{0.001};
     double nullspace_stiffness_target_{0.001};
     // Previous values for z position, velocity, and acceleration
@@ -180,15 +185,26 @@ public:
     double dt_f_ext_z = 0.0;
     double previous_dt_F_ext_z = 0.0;
     double previous_F_ext_z = 0.0;
+    double target_drill_velocity_ = 0.0;
+    double sum_drill_velocity_ = 0.0;
+    double velocity_error = 0.0;
+    double D_drilling_target = 100.0;
+    double Kp_drilling = 2500;
+    double Ki_drilling = 0.0;
+    double Kd_drilling = 50;
+    double min_D = 10.0;
+    double max_D = 750.0;
+    double target_D_z = 0.0;
 
     double alpha = 0.0;
     double time_constant = 0.0;
     bool ramping_active_ = false;
-    double target_stiffness_z_ = 6000;
+    double target_stiffness_z_ = 4000;
     bool position_set_ = false;
     Eigen::Vector3d position_accel_lim;
     bool accel_trigger = false;
     double elapsed_time = 0.0;
+    double velocity_error_sum = 0.0;
 
     //Logging
     int outcounter = 0;
@@ -209,7 +225,11 @@ public:
     // mode selection between impedance control and free floating
     bool mode_ = false; // false = impedance control, true = free floating
 
-    bool c_activation_ = false; // controller activation flag
+    bool control_act = false; // controller activation flag
+    bool drill_act = false; // drill activation flag
+    bool drill_start_posistion_set = false; // drill start position saved flag
+    bool target_drill_velocity_set = false; // target drill velocity set flag
+
 
     int accel_mode_ = 0; // acceleration calculation mode flag
 };

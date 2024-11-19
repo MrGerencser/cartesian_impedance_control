@@ -18,6 +18,7 @@
 #include <cmath>
 #include <exception>
 #include <string>
+#include <numeric>
 
 #include <Eigen/Eigen>
 
@@ -44,7 +45,7 @@ void CartesianImpedanceController::update_stiffness_and_references(){
   //std::lock_guard<std::mutex> position_d_target_mutex_lock(position_and_orientation_d_target_mutex_);
   position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
   
-  if (c_activation_){
+  if (control_act){
 
     orientation_d_target_ = Eigen::AngleAxisd(-M_PI/2, Eigen::Vector3d::UnitX())
                         * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY())
@@ -133,7 +134,7 @@ controller_interface::InterfaceConfiguration CartesianImpedanceController::state
 
 
 CallbackReturn CartesianImpedanceController::on_init() {
-   UserInputServer input_server_obj(&position_d_target_, &rotation_d_target_, &K, &D, &T, &mode_,&c_activation_);
+   UserInputServer input_server_obj(&position_d_target_, &rotation_d_target_, &K, &D, &T, &mode_,&control_act, &drill_act);
    std::thread input_thread(&UserInputServer::main, input_server_obj, 0, nullptr);
    input_thread.detach();
    return CallbackReturn::SUCCESS;
@@ -162,6 +163,8 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
   // Initialize publisher here
   jacobian_ee_publisher_ = get_node()->create_publisher<messages_fr3::msg::JacobianEE>("/jacobian_ee", 10);
   dt_Fext_z_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/dt_fext_z", 10);
+  D_z_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/D_z", 10);
+  VelocityErrorPublisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/velocity_error", 10);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
   return CallbackReturn::SUCCESS;
@@ -301,9 +304,34 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   previous_z_position_ = z_position;
 
 
-  if (abs(dt_f_ext_z) > 5500 && c_activation_ && (K.diagonal()[2] == 0.0) && accel_trigger == false) {
+  // save the position when the drill is activated
+  if (drill_act && drill_start_posistion_set == false){
+    drill_start_position = position;
+    drill_start_posistion_set = true;
+  }
+
+  // save all the velocities from start point of drilling into an array
+  if (drill_start_posistion_set && target_drill_velocity_set == false){
+    drill_velocities_.push_back(z_velocity);
+
+    // once we have drilled 1cm take the average of the drill velocities and set this to the target velocity
+    if (drill_start_position.z() - position.z() > 0.005){
+      sum_drill_velocity_ = std::accumulate(drill_velocities_.begin(), drill_velocities_.end(), 0.0);
+      target_drill_velocity_ = sum_drill_velocity_ / drill_velocities_.size();
+      target_drill_velocity_set = true;
+    }
+  }
+
+  velocity_error = target_drill_velocity_ - z_velocity;
+
+  // publish velicity error
+  std_msgs::msg::Float64 velocity_error_msg;
+  velocity_error_msg.data = velocity_error;
+  VelocityErrorPublisher_->publish(velocity_error_msg);
+
+  if (abs(dt_f_ext_z) > 5500 && control_act && (K.diagonal()[2] == 0.0) && accel_trigger == false) {
     // Start the ramping process if the condition is met
-    ramping_active_ = true;
+    //ramping_active_ = true;
     position_set_ = true;
     position_accel_lim = position;
     position_accel_lim.z() += 0.01;
@@ -342,7 +370,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
                         * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
   }
 
-  if (c_activation_){
+  if (control_act){
     position_d_ = position; // for setting orientaiton
     if (position_set_){
       position_d_ = position_accel_lim; // setting breakthrough position
@@ -364,10 +392,35 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   D =  D_gain* K.cwiseSqrt() * Lambda.diagonal().cwiseSqrt().asDiagonal();
   
   // when not in drilling mode we use the damoing term to be critically damped and dependant on K
-  if (c_activation_) {
-    D.diagonal()[2] = 10; // this is in drilling mode
-  
+  // TODO: Potentially add accel_trigger bool so if triggered we go back to the dynaic damping term which is dependant on K
+  if (drill_act){ 
+    D.diagonal()[2] = D_drilling_target; // this is in drilling mode
+    
+    // increase D to maintain target velocity
+    if (target_drill_velocity_set){
+      
+      // Calculate the integral of the velocity error
+      velocity_error_sum += velocity_error * dt;
+
+      target_D_z = D_drilling_target + Kp_drilling * velocity_error + Ki_drilling * velocity_error_sum - Kd_drilling * z_acceleration;
+
+      // Define the time constant for exponential response
+      double time_constant_D = 0.1; // Adjust this for ramping speed
+      double alpha_D = 1.0 - exp(-period.seconds() / time_constant_D); // Calculate smoothing factor
+
+      // Smoothly adjust D.diagonal()[2] toward the changing target_D_z
+      D.diagonal()[2] = alpha * target_D_z + (1.0 - alpha_D) * D.diagonal()[2];
+
+      // Clamp the value of D.diagonal()[2] to min_D and max_D
+      //D.diagonal()[2] = std::clamp(D.diagonal()[2], min_D, max_D);
+    }
+
   }
+
+  // publish D_z
+  std_msgs::msg::Float64 D_z_msg;
+  D_z_msg.data = D.diagonal()[2];
+  D_z_publisher_->publish(D_z_msg);
 
   F_impedance = -1 * (D * (jacobian * dq_) + K * error );     
 
@@ -402,7 +455,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   if (outcounter % 1000/update_frequency == 0){
     /* std::cout << "F_ext_robot [N]" << std::endl;*/
     std::cout << O_F_ext_hat_K << std::endl;
-    std::cout << O_F_ext_hat_K_M << std::endl;
+    /* std::cout << O_F_ext_hat_K_M << std::endl; */
     /*std::cout << "Lambda  Thetha.inv(): " << std::endl;
     std::cout << Lambda*Theta.inverse() << std::endl;
     std::cout << "tau_d" << std::endl;
@@ -416,11 +469,13 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     /* std::cout << "Inertia scaling:\n " << std::endl;
     std::cout << T << std::endl;
     std::cout << "Lambda:\n" << Lambda << std::endl; */
-    std::cout << "Control mode: " << mode_ << std::endl;
+    /* std::cout << "Control mode: " << mode_ << std::endl; */
     /* std::cout << "Position target :" << position_d_target_ << std::endl; */
+    std::cout << "Drilling actived: " << drill_act << std::endl;
     std::cout << "Stiffness:\n " << K << std::endl;
+    std::cout << "Damping_z:\n " << D.diagonal()[2] << std::endl;
     std::cout << "z_acceleration:\n " << z_acceleration << std::endl;
-    std::cout << "elapsed_time:\n " << elapsed_time << std::endl;
+    /* std::cout << "elapsed_time:\n " << elapsed_time << std::endl; */
   }
   outcounter++;
   update_stiffness_and_references();

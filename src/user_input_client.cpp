@@ -199,6 +199,7 @@ int main(int argc, char **argv) {
                         stiffness_request->d = 100.0;
                         stiffness_request->e = 100.0;
                         stiffness_request->f = 20.0;
+                        stiffness_request-> drillactivation = true;
                         break;
                     }
                     case 2:{
@@ -208,6 +209,7 @@ int main(int argc, char **argv) {
                         stiffness_request->d = 100.0;
                         stiffness_request->e = 100.0;
                         stiffness_request->f = 20.0;
+                        stiffness_request-> drillactivation = false;
                         break;
                     }
                     default:{
@@ -217,6 +219,7 @@ int main(int argc, char **argv) {
                         stiffness_request->d = 100.0;
                         stiffness_request->e = 100.0;
                         stiffness_request->f = 20.0;
+                        stiffness_request-> drillactivation = true;
                         break;
                     }
                 }

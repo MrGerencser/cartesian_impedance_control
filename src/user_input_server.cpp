@@ -52,6 +52,8 @@ void UserInputServer::SetStiffness(const std::shared_ptr<messages_fr3::srv::SetS
         (*D_)(i,i) = 2 * sqrt((*K_)(i,i)*(*T_)(i,i)); 
     }
     std::cout << "Went into setStiffness" << std::endl;
+    (*drill_activation_) = request->drillactivation;
+    std::cout << "Drill activation: " << (*drill_activation_) << std::endl;
 }
 
 void UserInputServer::SetMode(const std::shared_ptr<messages_fr3::srv::SetMode::Request> request, 

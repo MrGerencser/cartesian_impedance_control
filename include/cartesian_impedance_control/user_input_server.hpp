@@ -21,14 +21,16 @@ public:
                    Eigen::Matrix<double, 6, 6>* damping, 
                    Eigen::Matrix<double, 6, 6>* inertia,
                    bool* mode,
-                   bool* controller_activation) :
+                   bool* controller_activation,
+                   bool* drill_activation) :
   position_d_target_(position),
   rotation_d_target_(rotation),
   K_(stiffness),
   D_(damping),
   T_(inertia),
   control_mode_(mode),
-  controller_activation_(controller_activation){}
+  controller_activation_(controller_activation),
+  drill_activation_(drill_activation){}
   int main(int argc, char **argv);
 
 private:
@@ -39,6 +41,7 @@ private:
   Eigen::Matrix<double, 6, 6>* T_;
   bool* control_mode_;
   bool* controller_activation_;
+  bool* drill_activation_;
   
   //Eigen::VectorXd diag_values_inertia(6);
   void setPose(const std::shared_ptr<messages_fr3::srv::SetPose::Request> request, 

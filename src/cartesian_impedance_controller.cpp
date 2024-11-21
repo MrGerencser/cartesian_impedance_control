@@ -46,10 +46,17 @@ void CartesianImpedanceController::update_stiffness_and_references(){
   position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
   
   if (control_act){
-
-    orientation_d_target_ = Eigen::AngleAxisd(-M_PI/2, Eigen::Vector3d::UnitX())
-                        * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY())
-                        * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitZ());
+    
+    // orientation_d_target_ = Eigen::AngleAxisd(-M_PI/2, Eigen::Vector3d::UnitX())
+    //                     * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY())
+    //                     * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitZ());
+    
+    // save the current orientation as reference when drilling controller is activated
+    if (orientation_set == false)
+    {
+      orientation_d_target_ = orientation;
+      orientation_set = true;
+    }
 
     mode_ = false;
 
@@ -274,7 +281,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   Eigen::Map<Eigen::Matrix<double, 7, 7>> M(mass.data());
   Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose.data()));
   Eigen::Vector3d position(transform.translation());
-  Eigen::Quaterniond orientation(transform.rotation());
+  orientation = transform.rotation();
   
   double z_position = position.z();
   double previous_z_position = z_position;
@@ -374,6 +381,24 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
 
   if (control_act){
     position_d_ = position; // for setting orientaiton
+
+    if (projection_matrix_set == false){
+      
+      // determine relative rotation
+      relative_rotation = orientation*rotation_ref.inverse();
+
+      // determine the direction of the relative rotation
+      direction_current = relative_rotation * direction_ref;
+
+      direction_current.normalize();
+
+      projection_matrix = IDENTITY - direction_current * direction_current.transpose();
+
+      K = projection_matrix * K * projection_matrix;
+
+      projection_matrix_set = true;
+    }
+
     if (position_set_){
       position_d_ = position_accel_lim; // setting breakthrough position
       D_gain = 2.05;

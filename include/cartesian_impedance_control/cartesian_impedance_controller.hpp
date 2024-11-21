@@ -163,7 +163,15 @@ public:
     Eigen::Matrix<double, 6, 6> cartesian_inertia_target_;                                   // impedance damping term
     Eigen::Vector3d position_d_target_ = {0.5, 0.0, 0.5};
     Eigen::Vector3d rotation_d_target_ = {M_PI, 0.0, 0.0};
+    Eigen::Vector3d direction_ref = {0.5, 0.0, 0.5};
+    Eigen::Quaterniond rotation_ref = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX())
+                                    * Eigen::AngleAxisd(0, Eigen::Vector3d::UnitY())
+                                    * Eigen::AngleAxisd(0, Eigen::Vector3d::UnitZ());
+    Eigen::Quaterniond relative_rotation;
     Eigen::Quaterniond orientation_d_target_;
+    Eigen::Quaterniond orientation;
+    Eigen::Matrix<double, 6, 6> projection_matrix;
+    Eigen::Vector3d direction_current;
     Eigen::Vector3d position_d_;
     Eigen::Quaterniond orientation_d_; 
     Eigen::Matrix<double, 6, 1> F_impedance;  
@@ -238,6 +246,8 @@ public:
     bool drill_start_posistion_set = false; // drill start position saved flag
     bool target_drill_velocity_set = false; // target drill velocity set flag
     bool brake_through = false; // brake through flag
+    bool orientation_set = false; // orientation set flag
+    bool projection_matrix_set = false; // projection matrix set flag
 
 
     int accel_mode_ = 0; // acceleration calculation mode flag

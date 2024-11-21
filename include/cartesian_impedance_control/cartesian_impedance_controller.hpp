@@ -116,6 +116,7 @@ public:
     Eigen::Matrix<double, 6, 1> O_F_ext_hat_K_M = Eigen::MatrixXd::Zero(6,1);
     Eigen::Matrix<double, 7, 1> q_;
     Eigen::Matrix<double, 7, 1> dq_;
+    Eigen::Matrix<double, 7, 1> dq_prev_;
     Eigen::MatrixXd jacobian_transpose_pinv;  
 
     //Robot parameters
@@ -148,7 +149,7 @@ public:
                                                                 0,   0,   0,   0,   18,   0,
                                                                 0,   0,   0,   0,   0,   9).finished();
 
-    double D_gain = 2.05;
+    double D_gain = 2.5;
     Eigen::Matrix<double, 6, 6> Theta = IDENTITY;
     Eigen::Matrix<double, 6, 6> T = (Eigen::MatrixXd(6,6) <<       10,   0,   0,   0,   0,   0,
                                                                    0,   10,   0,   0,   0,   0,
@@ -174,6 +175,7 @@ public:
     Eigen::Matrix<double, 6, 1> error;
     Eigen::Vector3d drill_start_position; 
     std::vector<double> drill_velocities_;
+    std::vector<double> drill_forces_;
     double nullspace_stiffness_{0.001};
     double nullspace_stiffness_target_{0.001};
     // Previous values for z position, velocity, and acceleration
@@ -185,16 +187,22 @@ public:
     double dt_f_ext_z = 0.0;
     double previous_dt_F_ext_z = 0.0;
     double previous_F_ext_z = 0.0;
-    double target_drill_velocity_ = 0.0;
+    double target_drill_velocity_ = -0.008;
     double sum_drill_velocity_ = 0.0;
     double velocity_error = 0.0;
-    double D_drilling_target = 100.0;
-    double Kp_drilling = 2500;
+    double D_drilling_target = 0;
+    double Kp_drilling = 10000;
     double Ki_drilling = 0.0;
-    double Kd_drilling = 50;
+    double Kd_drilling = 2*sqrt(Kp_drilling);
     double min_D = 10.0;
     double max_D = 750.0;
     double target_D_z = 0.0;
+    double alpha_D = 0.0;
+    double time_constant_D = 0.0;
+    double target_K_z = 0.0;
+    double target_dampening = 0.0;
+    double target_drill_force_ = 0.0;
+    double sum_drill_force_ = 0.0;
 
     double alpha = 0.0;
     double time_constant = 0.0;
@@ -229,6 +237,7 @@ public:
     bool drill_act = false; // drill activation flag
     bool drill_start_posistion_set = false; // drill start position saved flag
     bool target_drill_velocity_set = false; // target drill velocity set flag
+    bool brake_through = false; // brake through flag
 
 
     int accel_mode_ = 0; // acceleration calculation mode flag

@@ -292,7 +292,6 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     
   // calculate_z_accel_jacobian(dt, previous_jacobian_EE, jacobian_EE, dq_, previous_dq_);
 
-
   // Update previous Jacobian for next iteration
   // previous_jacobian_EE = jacobian_EE;
 
@@ -313,15 +312,18 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   // save all the velocities from start point of drilling into an array
   if (drill_start_posistion_set && target_drill_velocity_set == false){
     drill_velocities_.push_back(z_velocity);
+    drill_forces_.push_back(F_ext_z);
 
     // once we have drilled 1cm take the average of the drill velocities and set this to the target velocity
     if (drill_start_position.z() - position.z() > 0.005){
       sum_drill_velocity_ = std::accumulate(drill_velocities_.begin(), drill_velocities_.end(), 0.0);
-      target_drill_velocity_ = sum_drill_velocity_ / drill_velocities_.size();
+      sum_drill_force_ = std::accumulate(drill_forces_.begin(), drill_forces_.end(), 0.0);
+      target_drill_force_ = sum_drill_force_ / drill_forces_.size();
+      target_dampening = target_drill_force_ / target_drill_velocity_;
       target_drill_velocity_set = true;
     }
   }
-
+  
   velocity_error = target_drill_velocity_ - z_velocity;
 
   // publish velicity error
@@ -331,7 +333,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
 
   if (abs(dt_f_ext_z) > 5500 && control_act && (K.diagonal()[2] == 0.0) && accel_trigger == false) {
     // Start the ramping process if the condition is met
-    //ramping_active_ = true;
+    //ramping_active_ = true;       !!!RAMPING TURNED OFF!!!
     position_set_ = true;
     position_accel_lim = position;
     position_accel_lim.z() += 0.01;
@@ -397,30 +399,38 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     D.diagonal()[2] = D_drilling_target; // this is in drilling mode
     
     // increase D to maintain target velocity
-    if (target_drill_velocity_set){
-      
+    if (target_drill_velocity_set && abs(dt_f_ext_z) > 5000){
+      brake_through = true;
+    }
+
+    if (brake_through){
       // Calculate the integral of the velocity error
       velocity_error_sum += velocity_error * dt;
 
       target_D_z = D_drilling_target + Kp_drilling * velocity_error + Ki_drilling * velocity_error_sum - Kd_drilling * z_acceleration;
 
+      target_D_z = std::max(target_D_z, 0.0);
+
       // Define the time constant for exponential response
-      double time_constant_D = 0.1; // Adjust this for ramping speed
-      double alpha_D = 1.0 - exp(-period.seconds() / time_constant_D); // Calculate smoothing factor
+      time_constant_D = 0.01; // Adjust this for ramping speed
+      alpha_D = 1.0 - exp(-dt / time_constant_D); // Calculate smoothing factor
 
       // Smoothly adjust D.diagonal()[2] toward the changing target_D_z
-      D.diagonal()[2] = alpha * target_D_z + (1.0 - alpha_D) * D.diagonal()[2];
-
+      D.diagonal()[2] = (alpha_D * abs(target_dampening) + (1.0 - alpha_D) * D.diagonal()[2]) * sqrt(Lambda.diagonal()[2]);
+      D.diagonal()[2] = 600;
       // Clamp the value of D.diagonal()[2] to min_D and max_D
       //D.diagonal()[2] = std::clamp(D.diagonal()[2], min_D, max_D);
     }
-
   }
 
   // publish D_z
   std_msgs::msg::Float64 D_z_msg;
   D_z_msg.data = D.diagonal()[2];
   D_z_publisher_->publish(D_z_msg);
+
+
+  dq_ = 0.1 * dq_ + 0.9 * dq_prev_;
+  dq_prev_ = dq_;
 
   F_impedance = -1 * (D * (jacobian * dq_) + K * error );     
 
@@ -475,6 +485,9 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     std::cout << "Stiffness:\n " << K << std::endl;
     std::cout << "Damping_z:\n " << D.diagonal()[2] << std::endl;
     std::cout << "z_acceleration:\n " << z_acceleration << std::endl;
+    std::cout << "target_drill_velocity_:\n " << target_drill_velocity_ << std::endl;
+    std::cout << "targer_drill_force_:\n " << target_drill_force_ << std::endl;
+    std::cout << "target_dampening:\n " << target_dampening << std::endl;
     /* std::cout << "elapsed_time:\n " << elapsed_time << std::endl; */
   }
   outcounter++;

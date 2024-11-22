@@ -43,7 +43,7 @@ void CartesianImpedanceController::update_stiffness_and_references(){
   //D = filter_params_ * cartesian_damping_target_ + (1.0 - filter_params_) * D;
   nullspace_stiffness_ = filter_params_ * nullspace_stiffness_target_ + (1.0 - filter_params_) * nullspace_stiffness_;
   //std::lock_guard<std::mutex> position_d_target_mutex_lock(position_and_orientation_d_target_mutex_);
-  position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
+  
   
   if (control_act){
     
@@ -55,6 +55,7 @@ void CartesianImpedanceController::update_stiffness_and_references(){
     if (orientation_set == false)
     {
       orientation_d_target_ = orientation;
+      position_d_target_ = position;
       orientation_set = true;
     }
 
@@ -62,6 +63,7 @@ void CartesianImpedanceController::update_stiffness_and_references(){
 
   }
 
+  position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
   orientation_d_ = orientation_d_.slerp(filter_params_, orientation_d_target_);
   F_contact_des = 0.05 * F_contact_target + 0.95 * F_contact_des;
 }
@@ -280,7 +282,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
   Eigen::Map<Eigen::Matrix<double, 7, 7>> M(mass.data());
   Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose.data()));
-  Eigen::Vector3d position(transform.translation());
+  position = transform.translation();
   orientation = transform.rotation();
   
   double z_position = position.z();
@@ -373,29 +375,50 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   // in free float mode we do not control the robot but to not have a jump in orientation when reactivated we set the desired orientation to the current one
   if (mode_){
     orientation_d_target_ = orientation;
-  } else {
+  } 
+  else if (!control_act){
     orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
                         * Eigen::AngleAxisd(rotation_d_target_[1], Eigen::Vector3d::UnitY())
                         * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
   }
 
   if (control_act){
-    position_d_ = position; // for setting orientaiton
 
+    if(drill_position_set == false){
+      orientation_d_ = orientation;
+      position_d_ = position;
+      drill_position_set = true;
+    }
+    
     if (projection_matrix_set == false){
       
+      K_original = K;
+
       // determine relative rotation
       relative_rotation = orientation*rotation_ref.inverse();
 
+      // change to rotation matrix
+      Eigen::Matrix3d relative_rotation_matrix = relative_rotation.toRotationMatrix();
+
       // determine the direction of the relative rotation
-      direction_current = relative_rotation * direction_ref;
+      direction_current = relative_rotation_matrix * direction_ref;
 
       direction_current.normalize();
 
-      projection_matrix = IDENTITY - direction_current * direction_current.transpose();
+      projection_matrix.topLeftCorner(3,3) = Eigen::Matrix3d::Identity() - direction_current * direction_current.transpose();
+      projection_matrix.bottomRightCorner(3,3) = Eigen::Matrix3d::Identity();
 
-      K = projection_matrix * K * projection_matrix;
+      K.topLeftCorner(3,3) = projection_matrix.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
 
+      // clamp stiffness to not have any negative values
+      //K = K.cwiseMax(0.0);
+
+      // K.topLeftCorner(3,3).normalize();
+      // K.triangularView<Eigen::StrictlyUpper>().setZero();
+      // K.triangularView<Eigen::StrictlyLower>().setZero();
+
+      //K = K.diagonal().asDiagonal();
+      
       projection_matrix_set = true;
     }
 
@@ -416,7 +439,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
 
   Lambda = (jacobian * M.inverse() * jacobian.transpose()).inverse();    
     // correcting D to be critically damped
-  D =  D_gain* K.cwiseSqrt() * Lambda.diagonal().cwiseSqrt().asDiagonal();
+  D =  D_gain* K.cwiseMax(0.0).cwiseSqrt() * Lambda.diagonal().cwiseSqrt().asDiagonal();
   
   // when not in drilling mode we use the damoing term to be critically damped and dependant on K
   // TODO: Potentially add accel_trigger bool so if triggered we go back to the dynaic damping term which is dependant on K
@@ -506,13 +529,21 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     std::cout << "Lambda:\n" << Lambda << std::endl; */
     /* std::cout << "Control mode: " << mode_ << std::endl; */
     /* std::cout << "Position target :" << position_d_target_ << std::endl; */
-    std::cout << "Drilling actived: " << drill_act << std::endl;
+    // print the phrobenius norm of the K
+    std::cout << "K_norm: " << K.norm() << std::endl;
+    // std::cout << "Drilling actived: " << drill_act << std::endl;
     std::cout << "Stiffness:\n " << K << std::endl;
-    std::cout << "Damping_z:\n " << D.diagonal()[2] << std::endl;
-    std::cout << "z_acceleration:\n " << z_acceleration << std::endl;
-    std::cout << "target_drill_velocity_:\n " << target_drill_velocity_ << std::endl;
-    std::cout << "targer_drill_force_:\n " << target_drill_force_ << std::endl;
-    std::cout << "target_dampening:\n " << target_dampening << std::endl;
+    std::cout << "Damping:\n " << D << std::endl;
+    std::cout << " F_impedance: " << F_impedance << std::endl;
+    // std::cout << "Damping_z:\n " << D.diagonal()[2] << std::endl;
+    // std::cout << "z_acceleration:\n " << z_acceleration << std::endl;
+    // std::cout << "target_drill_velocity_:\n " << target_drill_velocity_ << std::endl;
+    // std::cout << "targer_drill_force_:\n " << target_drill_force_ << std::endl;
+    // std::cout << "target_dampening:\n " << target_dampening << std::endl;
+    // std::cout << "projection_matrix:\n " << projection_matrix << std::endl;
+    std::cout << "k_top_left:\n " << K.topLeftCorner<3, 3>() << std::endl;
+    std::cout << "projection_top_left:\n " << projection_top_left << std::endl;
+    std::cout << "direction_current:\n " << direction_current << std::endl;
     /* std::cout << "elapsed_time:\n " << elapsed_time << std::endl; */
   }
   outcounter++;

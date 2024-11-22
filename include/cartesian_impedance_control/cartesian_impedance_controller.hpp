@@ -135,9 +135,9 @@ public:
     Eigen::Matrix<double, 6, 6> Lambda = IDENTITY;                                           // operational space mass matrix
     Eigen::Matrix<double, 6, 6> Sm = IDENTITY;                                               // task space selection matrix for positions and rotation
     Eigen::Matrix<double, 6, 6> Sf = Eigen::MatrixXd::Zero(6, 6);                            // task space selection matrix for forces
-    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 2000,   0,   0,   0,   0,   0,
-                                                                0, 2000,   0,   0,   0,   0,
-                                                                0,   0, 2000,   0,   0,   0,  // impedance stiffness term
+    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 250,   0,   0,   0,   0,   0,
+                                                                0, 250,   0,   0,   0,   0,
+                                                                0,   0, 250,   0,   0,   0,  // impedance stiffness term
                                                                 0,   0,   0, 100,   0,   0,
                                                                 0,   0,   0,   0, 100,   0,
                                                                 0,   0,   0,   0,   0,  20).finished();
@@ -149,7 +149,7 @@ public:
                                                                 0,   0,   0,   0,   18,   0,
                                                                 0,   0,   0,   0,   0,   9).finished();
 
-    double D_gain = 2.5;
+    double D_gain = 2.05;
     Eigen::Matrix<double, 6, 6> Theta = IDENTITY;
     Eigen::Matrix<double, 6, 6> T = (Eigen::MatrixXd(6,6) <<       10,   0,   0,   0,   0,   0,
                                                                    0,   10,   0,   0,   0,   0,
@@ -161,15 +161,18 @@ public:
     Eigen::Matrix<double, 6, 6> cartesian_stiffness_target_;                                 // impedance damping term
     Eigen::Matrix<double, 6, 6> cartesian_damping_target_;                                   // impedance damping term
     Eigen::Matrix<double, 6, 6> cartesian_inertia_target_;                                   // impedance damping term
+    Eigen::Matrix<double, 6, 6> K_original;
+    Eigen::Matrix<double, 3, 3> projection_top_left;
     Eigen::Vector3d position_d_target_ = {0.5, 0.0, 0.5};
     Eigen::Vector3d rotation_d_target_ = {M_PI, 0.0, 0.0};
-    Eigen::Vector3d direction_ref = {0.5, 0.0, 0.5};
+    Eigen::Vector3d direction_ref = {0.0, -1.0, 0.0};
     Eigen::Quaterniond rotation_ref = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX())
                                     * Eigen::AngleAxisd(0, Eigen::Vector3d::UnitY())
                                     * Eigen::AngleAxisd(0, Eigen::Vector3d::UnitZ());
     Eigen::Quaterniond relative_rotation;
     Eigen::Quaterniond orientation_d_target_;
     Eigen::Quaterniond orientation;
+    Eigen::Vector3d position;
     Eigen::Matrix<double, 6, 6> projection_matrix;
     Eigen::Vector3d direction_current;
     Eigen::Vector3d position_d_;
@@ -248,6 +251,7 @@ public:
     bool brake_through = false; // brake through flag
     bool orientation_set = false; // orientation set flag
     bool projection_matrix_set = false; // projection matrix set flag
+    bool drill_position_set = false; // drill position set flag
 
 
     int accel_mode_ = 0; // acceleration calculation mode flag

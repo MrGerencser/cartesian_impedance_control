@@ -294,15 +294,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   // Calculate the Jacobian derivative using finite differences
   Eigen::Matrix<double, 6, 7> jacobian_EE_derivative;
   
-  // Publish the JacobianEE message
-  //publishJacobianEE(jacobian_array_EE, jacobian_EE_derivative);
-  
   updateJointStates();
-    
-  // calculate_z_accel_jacobian(dt, previous_jacobian_EE, jacobian_EE, dq_, previous_dq_);
-
-  // Update previous Jacobian for next iteration
-  // previous_jacobian_EE = jacobian_EE;
 
   calculate_accel_pose(dt, z_position);
 
@@ -340,38 +332,6 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   velocity_error_msg.data = velocity_error;
   VelocityErrorPublisher_->publish(velocity_error_msg);
 
-  if (abs(dt_f_ext_z) > 5500 && control_act && (K.diagonal()[2] == 0.0) && accel_trigger == false) {
-    // Start the ramping process if the condition is met
-    //ramping_active_ = true;       !!!RAMPING TURNED OFF!!!
-    position_set_ = true;
-    position_accel_lim = position;
-    position_accel_lim.z() += 0.01;
-    accel_trigger = true;
-  }
-
-  if (ramping_active_) {
-      time_constant = 0.01; // Adjust this to control the response speed
-      alpha = 1.0 - exp(-period.seconds() / time_constant);
-      
-      // Gradually increase K.diagonal()[2] towards the target value
-      K.diagonal()[2] = alpha * target_stiffness_z_ + (1.0 - alpha) * K.diagonal()[2];
-
-      elapsed_time += period.seconds();
-
-      // Stop ramping once we reach the target value
-      if (K.diagonal()[2] >= target_stiffness_z_) {
-          K.diagonal()[2] = target_stiffness_z_;
-      }
-
-      if (elapsed_time > 5.0) {
-        // Reset the ramping process after 5 seconds
-        ramping_active_ = false;
-        accel_trigger = false;
-        elapsed_time = 0.0;
-        K.diagonal()[2] = 0.0;
-      }
-  }
-
   // in free float mode we do not control the robot but to not have a jump in orientation when reactivated we set the desired orientation to the current one
   if (mode_){
     orientation_d_target_ = orientation;
@@ -390,7 +350,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
       drill_position_set = true;
     }
     
-    if (projection_matrix_set == false){
+    if (projection_matrix_decrease_set == false){
       
       K_original = K;
 
@@ -405,27 +365,57 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
 
       direction_current.normalize();
 
-      projection_matrix.topLeftCorner(3,3) = Eigen::Matrix3d::Identity() - direction_current * direction_current.transpose();
-      projection_matrix.bottomRightCorner(3,3) = Eigen::Matrix3d::Identity();
+      projection_matrix_decrease.topLeftCorner(3,3) = Eigen::Matrix3d::Identity() - direction_current * direction_current.transpose();
+      projection_matrix_increase.topLeftCorner(3,3) = Eigen::Matrix3d::Identity() + K_increase_gain*(direction_current * direction_current.transpose());
+      projection_matrix_decrease.bottomRightCorner(3,3) = Eigen::Matrix3d::Identity();
+      projection_matrix_increase.bottomRightCorner(3,3) = Eigen::Matrix3d::Identity();
 
-      K.topLeftCorner(3,3) = projection_matrix.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
-
-      // clamp stiffness to not have any negative values
-      //K = K.cwiseMax(0.0);
-
-      // K.topLeftCorner(3,3).normalize();
-      // K.triangularView<Eigen::StrictlyUpper>().setZero();
-      // K.triangularView<Eigen::StrictlyLower>().setZero();
-
-      //K = K.diagonal().asDiagonal();
+      K.topLeftCorner(3,3) = projection_matrix_decrease.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
       
-      projection_matrix_set = true;
+      projection_matrix_decrease_set = true;
+
     }
 
-    if (position_set_){
+  }
+
+  if (abs(dt_f_ext_z) > 5500 && control_act && accel_trigger == false) {
+    // Start the ramping process if the condition is met
+    ramping_active_ = true;       
+    position_set_ = true;
+    position_accel_lim = position - 0.01 * direction_current;   // ADAJUST TO THE POSITION IN DRILLING DIRECTION
+    accel_trigger = true;
+  }
+
+  if (ramping_active_) {
+        time_constant = 0.01; // Adjust this to control the response speed
+        alpha = 1.0 - exp(-period.seconds() / time_constant);
+
+        // Calculate the target stiffness value
+        target_K = projection_matrix_increase.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
+        
+        // Gradually increase K.diagonal()[2] towards the target value
+        K.topLeftCorner(3,3) = alpha * target_K + (1.0 - alpha) * K.topLeftCorner(3,3);
+
+        // Stop ramping once we reach the target value
+        if (K.topLeftCorner(3, 3).isApprox(target_K, 1e-6)) {
+            K.topLeftCorner(3,3) = target_K;
+            elapsed_time += period.seconds();
+        }
+
+        if (elapsed_time > 3.0) {
+          // Reset the ramping process after 5 seconds
+          ramping_active_ = false;
+          accel_trigger = false;
+          elapsed_time = 0.0;
+          K.topLeftCorner(3,3) = projection_matrix_decrease.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
+          position_set_ = false;
+          position_d_ = position;
+        }
+  } 
+
+  if (position_set_){
       position_d_ = position_accel_lim; // setting breakthrough position
       D_gain = 2.05;
-    }
   }
 
   error.head(3) << position - position_d_;
@@ -441,6 +431,9 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     // correcting D to be critically damped
   D =  D_gain* K.cwiseMax(0.0).cwiseSqrt() * Lambda.diagonal().cwiseSqrt().asDiagonal();
   
+  D.topRightCorner(3,3).setZero();
+  D.bottomLeftCorner(3,3).setZero();
+
   // when not in drilling mode we use the damoing term to be critically damped and dependant on K
   // TODO: Potentially add accel_trigger bool so if triggered we go back to the dynaic damping term which is dependant on K
   if (drill_act){ 
@@ -475,10 +468,6 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   std_msgs::msg::Float64 D_z_msg;
   D_z_msg.data = D.diagonal()[2];
   D_z_publisher_->publish(D_z_msg);
-
-
-  dq_ = 0.1 * dq_ + 0.9 * dq_prev_;
-  dq_prev_ = dq_;
 
   F_impedance = -1 * (D * (jacobian * dq_) + K * error );     
 
@@ -540,7 +529,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     // std::cout << "target_drill_velocity_:\n " << target_drill_velocity_ << std::endl;
     // std::cout << "targer_drill_force_:\n " << target_drill_force_ << std::endl;
     // std::cout << "target_dampening:\n " << target_dampening << std::endl;
-    // std::cout << "projection_matrix:\n " << projection_matrix << std::endl;
+    // std::cout << "projection_matrix_decrease:\n " << projection_matrix_decrease << std::endl;
     std::cout << "k_top_left:\n " << K.topLeftCorner<3, 3>() << std::endl;
     std::cout << "projection_top_left:\n " << projection_top_left << std::endl;
     std::cout << "direction_current:\n " << direction_current << std::endl;

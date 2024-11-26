@@ -135,9 +135,9 @@ public:
     Eigen::Matrix<double, 6, 6> Lambda = IDENTITY;                                           // operational space mass matrix
     Eigen::Matrix<double, 6, 6> Sm = IDENTITY;                                               // task space selection matrix for positions and rotation
     Eigen::Matrix<double, 6, 6> Sf = Eigen::MatrixXd::Zero(6, 6);                            // task space selection matrix for forces
-    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 250,   0,   0,   0,   0,   0,
-                                                                0, 250,   0,   0,   0,   0,
-                                                                0,   0, 250,   0,   0,   0,  // impedance stiffness term
+    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 1000,   0,   0,   0,   0,   0,
+                                                                0, 1000,   0,   0,   0,   0,
+                                                                0,   0, 1000,   0,   0,   0,  // impedance stiffness term
                                                                 0,   0,   0, 100,   0,   0,
                                                                 0,   0,   0,   0, 100,   0,
                                                                 0,   0,   0,   0,   0,  20).finished();
@@ -173,7 +173,9 @@ public:
     Eigen::Quaterniond orientation_d_target_;
     Eigen::Quaterniond orientation;
     Eigen::Vector3d position;
-    Eigen::Matrix<double, 6, 6> projection_matrix;
+    Eigen::Matrix<double, 6, 6> projection_matrix_decrease;
+    Eigen::Matrix<double, 6, 6> projection_matrix_increase;
+    Eigen::Matrix3d target_K;
     Eigen::Vector3d direction_current;
     Eigen::Vector3d position_d_;
     Eigen::Quaterniond orientation_d_; 
@@ -214,6 +216,7 @@ public:
     double target_dampening = 0.0;
     double target_drill_force_ = 0.0;
     double sum_drill_force_ = 0.0;
+    double K_increase_gain = 1.0;
 
     double alpha = 0.0;
     double time_constant = 0.0;
@@ -250,7 +253,8 @@ public:
     bool target_drill_velocity_set = false; // target drill velocity set flag
     bool brake_through = false; // brake through flag
     bool orientation_set = false; // orientation set flag
-    bool projection_matrix_set = false; // projection matrix set flag
+    bool projection_matrix_decrease_set = false; // projection matrix set flag
+    bool projection_matrix_increase_set = false; // projection matrix set flag
     bool drill_position_set = false; // drill position set flag
 
 

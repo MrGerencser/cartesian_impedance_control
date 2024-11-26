@@ -27,6 +27,7 @@ find_package(franka_semantic_components REQUIRED)
 find_package(generate_parameter_library)
 find_package(std_msgs REQUIRED)
 find_package(messages_fr3 REQUIRED)
+find_package(rclcpp_action REQUIRED)
 
 
 add_library(

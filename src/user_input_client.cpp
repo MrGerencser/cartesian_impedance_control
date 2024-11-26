@@ -1,6 +1,10 @@
 #include <rclcpp/rclcpp.hpp>
-#include "messages_fr3/srv/set_pose.hpp"
-#include "messages_fr3/srv/set_param.hpp"
+#include <messages_fr3/srv/set_pose.hpp>
+#include <messages_fr3/srv/set_param.hpp>
+#include <messages_fr3/srv/set_stiffness.hpp>
+#include <messages_fr3/srv/set_mode.hpp>
+#include <messages_fr3/srv/controller_activation.hpp>
+#include <messages_fr3/srv/planner_service.hpp>
 
 #include <chrono>
 #include <cstdlib>
@@ -8,7 +12,9 @@
 #include <array>
 #include <cmath>
 
+
 int main(int argc, char **argv) {
+    
     rclcpp::init(argc, argv);
     std::shared_ptr<rclcpp::Node> node = rclcpp::Node::make_shared("user_input_client");
 
@@ -20,10 +26,30 @@ int main(int argc, char **argv) {
         node->create_client<messages_fr3::srv::SetParam>("set_param");
     auto param_request = std::make_shared<messages_fr3::srv::SetParam::Request>();
 
-    int task_selection, pose_selection, param_selection;
+    rclcpp::Client<messages_fr3::srv::SetMode>::SharedPtr mode_client =
+        node->create_client<messages_fr3::srv::SetMode>("set_mode");
+    auto mode_request = std::make_shared<messages_fr3::srv::SetMode::Request>();
+
+    rclcpp::Client<messages_fr3::srv::ControllerActivation>::SharedPtr activation_client =
+        node->create_client<messages_fr3::srv::ControllerActivation>("controller_activation");
+    auto activation_request = std::make_shared<messages_fr3::srv::ControllerActivation::Request>();
+
+    rclcpp::Client<messages_fr3::srv::SetStiffness>::SharedPtr stiffness_client =
+        node->create_client<messages_fr3::srv::SetStiffness>("set_stiffness");
+    auto stiffness_request = std::make_shared<messages_fr3::srv::SetStiffness::Request>();
+
+    rclcpp::Client<messages_fr3::srv::PlannerService>::SharedPtr planner_client =
+        node->create_client<messages_fr3::srv::PlannerService>("planner_service");
+    auto planner_request = std::make_shared<messages_fr3::srv::PlannerService::Request>();
+
+    int task_selection, pose_selection, param_selection, mode_selection, activation_selection, planner_selection;
+   
 
     while (rclcpp::ok()){
-        std::cout << "Enter the next task: \n [1] --> Change position \n [2] --> Change impedance parameters" << std::endl;
+
+        std::cout << "Enter the next task: \n [1] --> Change position \n [2] --> Change impedance parameters \n"
+                << " [3] --> Choose control mode \n [4] --> Drill Position activation \n [5] --> Update Stiffness \n" 
+                << " [6] Logging " << std::endl;
         std:: cin >> task_selection;
         switch (task_selection){
             case 1:{ 
@@ -111,6 +137,122 @@ int main(int argc, char **argv) {
                     RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service setParam");
                 }
                 break;
+            }
+            case 3:{
+                std::cout << "Enter new mode: \n [1] --> Free float \n [2] --> Impedance Control\n";
+                std::cin >> mode_selection;
+                switch(mode_selection){
+                    case 1:{
+                        mode_request->mode = true;
+                        break;
+                    }
+                    case 2:{
+                        mode_request->mode = false;
+                        break;
+                    }
+                    default:{
+                        mode_request->mode = false;
+                        break;
+                    }
+                }
+                auto mode_result = mode_client->async_send_request(mode_request);
+                if(rclcpp::spin_until_future_complete(node, mode_result) ==  rclcpp::FutureReturnCode::SUCCESS){
+                    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Sum: %d", mode_result.get()->success);
+                } else {
+                    RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service setMode");
+                }
+                break;
+            }
+            case 4:{
+                std::cout << "Activate drill control: \n [1] --> Activate \n [2] --> Deactivate\n";
+                std::cin >> activation_selection;
+                switch(activation_selection){
+                    case 1:{
+                        activation_request->controller_activation = true;
+                        break;
+                    }
+                    case 2:{
+                        activation_request->controller_activation = false;
+                        break;
+                    }
+                    default:{
+                        activation_request->controller_activation = false;
+                        break;
+                    }
+                }
+                auto activation_result = activation_client->async_send_request(activation_request);
+                if(rclcpp::spin_until_future_complete(node, activation_result) ==  rclcpp::FutureReturnCode::SUCCESS){
+                    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Sum: %d", activation_result.get()->success);
+                } else {
+                    RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service controllerActivation");
+                }
+                break;
+            }
+            case 5: {
+                std::cout << "Set stiffness: \n [1] --> adjust z component \n [2] --> default values\n";
+                std::cin >> param_selection;
+                switch(param_selection){
+                    case 1:{
+                        stiffness_request->a = 2500.0;
+                        stiffness_request->b = 2500.0;
+                        stiffness_request->c = 0.0;
+                        stiffness_request->d = 100.0;
+                        stiffness_request->e = 100.0;
+                        stiffness_request->f = 20.0;
+                        stiffness_request-> drillactivation = true;
+                        break;
+                    }
+                    case 2:{
+                        stiffness_request->a = 2000.0;
+                        stiffness_request->b = 2000.0;
+                        stiffness_request->c = 2000.0;
+                        stiffness_request->d = 100.0;
+                        stiffness_request->e = 100.0;
+                        stiffness_request->f = 20.0;
+                        stiffness_request-> drillactivation = false;
+                        break;
+                    }
+                    default:{
+                        stiffness_request->a = 2000.0;
+                        stiffness_request->b = 2000.0;
+                        stiffness_request->c = 2000.0;
+                        stiffness_request->d = 100.0;
+                        stiffness_request->e = 100.0;
+                        stiffness_request->f = 20.0;
+                        stiffness_request-> drillactivation = true;
+                        break;
+                    }
+                }
+                auto stiffness_result = stiffness_client->async_send_request(stiffness_request);
+                if(rclcpp::spin_until_future_complete(node, stiffness_result) ==  rclcpp::FutureReturnCode::SUCCESS){
+                    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Sum: %d", stiffness_result.get()->success);
+                } else {
+                    RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service setStiffness");
+                } break;
+            }
+            case 6:{
+                std::cout << "Activate logging: \n [1] --> Activate \n [2] --> Deactivate\n";
+                std::cin >> planner_selection;
+                switch(planner_selection){
+                    case 1:{
+                        planner_request->command = "a";
+                        break;
+                    }
+                    case 2:{
+                        planner_request->command = "d";
+                        break;
+                    }
+                    default:{
+                        planner_request->command = "d";
+                        break;
+                    }           
+                }
+                auto planner_result = planner_client->async_send_request(planner_request);
+                if(rclcpp::spin_until_future_complete(node, planner_result) ==  rclcpp::FutureReturnCode::SUCCESS){
+                    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Sum: %d", planner_result.get()->success);
+                } else {
+                    RCLCPP_ERROR(rclcpp::get_logger("rclcpp"), "Failed to call service plannerService");
+                } break;
             }
             default:{
                 std::cout << "Invalid selection, please try again\n";

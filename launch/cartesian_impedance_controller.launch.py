@@ -24,7 +24,7 @@ def generate_launch_description():
     
     # Execute the set_load.sh script
     set_load = ExecuteProcess(
-        cmd=['/home/nilsjohnson/franka_ros2_ws/src/cartesian_impedance_control/launch/set_load.sh'],
+        cmd=['/home/sopho/grasp_franka_ros2_ws/src/cartesian_impedance_control/launch/set_load.sh'],
         output='screen',
     )
     # Start the cartesian_impedance_controller after set_load.sh finishes
@@ -79,7 +79,7 @@ def generate_launch_description():
         ),
 
         ExecuteProcess(
-            cmd=['/home/nilsjohnson/franka_ros2_ws/src/cartesian_impedance_control/launch/set_force_torque_limits.sh'],  # Reference to the shell script in the same folder
+            cmd=['/home/sopho/grasp_franka_ros2_ws/src/cartesian_impedance_control/launch/set_force_torque_limits.sh'],  # Reference to the shell script in the same folder
             output='screen',
         ),
 

@@ -35,6 +35,83 @@ std::ostream& operator<<(std::ostream& ostream, const std::array<T, N>& array) {
 
 namespace cartesian_impedance_control {
 
+  void CartesianImpedanceController::objectPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+    latest_object_pose_ = *msg;
+    has_received_object_pose_ = true;
+    
+    if (following_object_) {
+        // Get workspace bounds from parameters
+        double x_min = get_node()->get_parameter("workspace_bounds.x_min").as_double();
+        double x_max = get_node()->get_parameter("workspace_bounds.x_max").as_double();
+        double y_min = get_node()->get_parameter("workspace_bounds.y_min").as_double();
+        double y_max = get_node()->get_parameter("workspace_bounds.y_max").as_double();
+        double z_min = get_node()->get_parameter("workspace_bounds.z_min").as_double();
+        double z_max = get_node()->get_parameter("workspace_bounds.z_max").as_double();
+        
+        
+        // Safe position within workspace bounds
+        double safe_x = std::max(x_min, std::min(x_max, msg->pose.position.x));
+        double safe_y = std::max(y_min, std::min(y_max, msg->pose.position.y));
+        double safe_z = std::max(z_min, std::min(z_max, msg->pose.position.z + 0.05));
+        
+      
+      // Get current position for distance calculation
+      std::array<double, 16> current_pose = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+      Eigen::Affine3d current_transform(Eigen::Matrix4d::Map(current_pose.data()));
+      Eigen::Vector3d current_position = current_transform.translation();
+      
+      // Calculate distance between current and target position
+      double distance = std::sqrt(
+          std::pow(safe_x - current_position.x(), 2) +
+          std::pow(safe_y - current_position.y(), 2) +
+          std::pow(safe_z - current_position.z(), 2)
+      );
+      
+      // Log if position was clamped to workspace
+      if (safe_x != msg->pose.position.x || safe_y != msg->pose.position.y || 
+          safe_z != msg->pose.position.z + 0.05) {
+          RCLCPP_WARN(get_node()->get_logger(), 
+              "Target position outside workspace bounds, limiting to safe region: [%.3f, %.3f, %.3f]",
+              safe_x, safe_y, safe_z);
+      }
+      
+      // Update target position with safety measures applied
+      std::lock_guard<std::mutex> lock(position_and_orientation_d_target_mutex_);
+      position_d_target_ = Eigen::Vector3d(safe_x, safe_y, safe_z);
+      
+      // Convert quaternion to rotation for target orientation
+      Eigen::Quaterniond q(
+          msg->pose.orientation.w,
+          msg->pose.orientation.x,
+          msg->pose.orientation.y,
+          msg->pose.orientation.z);
+      
+      // Use quaternion directly instead of Euler angles
+      orientation_d_target_ = q;
+  }
+}
+
+void CartesianImpedanceController::toggleObjectFollowing(
+  const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+  std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
+  
+  following_object_ = request->data;
+  
+  if (following_object_) {
+      if (!has_received_object_pose_) {
+          response->success = false;
+          RCLCPP_WARN(get_node()->get_logger(), "Attempted to follow object but no pose received");
+          return;
+      }
+      
+      RCLCPP_INFO(get_node()->get_logger(), "Object following enabled");
+      response->success = true;
+  } else {
+      RCLCPP_INFO(get_node()->get_logger(), "Object following disabled");
+      response->success = true;
+  }
+}
+
 void CartesianImpedanceController::update_stiffness_and_references(){
   //target by filtering
   /** at the moment we do not use dynamic reconfigure and control the robot via D, K and T **/
@@ -133,6 +210,14 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
   franka_robot_model_ = std::make_unique<franka_semantic_components::FrankaRobotModel>(
   franka_semantic_components::FrankaRobotModel(robot_name_ + "/" + k_robot_model_interface_name,
                                                robot_name_ + "/" + k_robot_state_interface_name));
+
+  // Add these lines to your on_configure method before the try block
+  get_node()->declare_parameter("workspace_bounds.x_min", -0.25);
+  get_node()->declare_parameter("workspace_bounds.x_max", 0.75);
+  get_node()->declare_parameter("workspace_bounds.y_min", -0.5);
+  get_node()->declare_parameter("workspace_bounds.y_max", 0.5);
+  get_node()->declare_parameter("workspace_bounds.z_min", -0.05);
+  get_node()->declare_parameter("workspace_bounds.z_max", 2.0);
                                                
   try {
     rclcpp::QoS qos_profile(1); // Depth of the message queue
@@ -141,6 +226,19 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
     "franka_robot_state_broadcaster/robot_state", qos_profile, 
     std::bind(&CartesianImpedanceController::topic_callback, this, std::placeholders::_1));
     std::cout << "Succesfully subscribed to robot_state_broadcaster" << std::endl;
+
+    object_pose_subscription_ = get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
+      "/perception/object_pose", 
+      10,
+      std::bind(&CartesianImpedanceController::objectPoseCallback, this, std::placeholders::_1));
+  
+    // Initialize the toggle following service - IMPORTANT: Name must match client!
+    follow_object_service_ = get_node()->create_service<std_srvs::srv::SetBool>(
+        "toggle_object_following",  // This must match the client's service name exactly
+        std::bind(&CartesianImpedanceController::toggleObjectFollowing, this, 
+                  std::placeholders::_1, std::placeholders::_2));
+    
+    RCLCPP_INFO(get_node()->get_logger(), "Object following service initialized");
   }
 
   catch (const std::exception& e) {
@@ -291,7 +389,18 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     command_interfaces_[i].set_value(tau_d(i));
   }
   
-  if (outcounter % 1000/update_frequency == 0){
+  // In the update method, replace the current printing block with this:
+if (outcounter % 1000/update_frequency == 0){
+  // Option 1: Print only error information
+  std::cout << "========== Controller Error ===========" << std::endl;
+  std::cout << "Position error [m]: " << error.head(3).transpose() << std::endl;
+  std::cout << "Orientation error: " << error.tail(3).transpose() << std::endl;
+  std::cout << "Error norm: " << error.norm() << std::endl;
+  
+  // Option 2: Or add a flag to control what gets printed
+  bool print_detailed_debug = false;  // Set to true for full debug info
+  
+  if (print_detailed_debug) {
     std::cout << "F_ext_robot [N]" << std::endl;
     std::cout << O_F_ext_hat_K << std::endl;
     std::cout << O_F_ext_hat_K_M << std::endl;
@@ -308,6 +417,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     std::cout << "Inertia scaling [m]: " << std::endl;
     std::cout << T << std::endl;
   }
+}
   outcounter++;
   update_stiffness_and_references();
   return controller_interface::return_type::OK;

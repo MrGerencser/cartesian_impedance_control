@@ -50,6 +50,9 @@
 #include "franka_semantic_components/franka_robot_model.hpp"
 #include "franka_semantic_components/franka_robot_state.hpp"
 
+#include <std_srvs/srv/set_bool.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+
 #define IDENTITY Eigen::MatrixXd::Identity(6, 6)
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
@@ -80,12 +83,30 @@ public:
 
     void setPose(const std::shared_ptr<messages_fr3::srv::SetPose::Request> request, 
     std::shared_ptr<messages_fr3::srv::SetPose::Response> response);
+
+
+
+
       
 
  private:
     //Nodes
     rclcpp::Subscription<franka_msgs::msg::FrankaRobotState>::SharedPtr franka_state_subscriber = nullptr;
     rclcpp::Service<messages_fr3::srv::SetPose>::SharedPtr pose_srv_;
+
+    // Add these new members
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr object_pose_subscription_ = nullptr;
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr follow_object_service_ = nullptr;
+    geometry_msgs::msg::PoseStamped latest_object_pose_;
+    std::mutex object_pose_mutex_;
+    bool following_object_ = false;
+    bool has_received_object_pose_ = false;
+    
+    // Add these method declarations
+    void objectPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+    void toggleObjectFollowing(
+        const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+        std::shared_ptr<std_srvs::srv::SetBool::Response> response);
 
 
     //Functions
@@ -122,12 +143,12 @@ public:
     Eigen::Matrix<double, 6, 6> Lambda = IDENTITY;                                           // operational space mass matrix
     Eigen::Matrix<double, 6, 6> Sm = IDENTITY;                                               // task space selection matrix for positions and rotation
     Eigen::Matrix<double, 6, 6> Sf = Eigen::MatrixXd::Zero(6, 6);                            // task space selection matrix for forces
-    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 250,   0,   0,   0,   0,   0,
-                                                                0, 250,   0,   0,   0,   0,
-                                                                0,   0, 250,   0,   0,   0,  // impedance stiffness term
-                                                                0,   0,   0, 130,   0,   0,
-                                                                0,   0,   0,   0, 130,   0,
-                                                                0,   0,   0,   0,   0,  10).finished();
+    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 1500,   0,   0,   0,   0,   0,
+                                                                0, 1500,   0,   0,   0,   0,
+                                                                0,   0, 1500,   0,   0,   0,  // impedance stiffness term
+                                                                0,   0,   0, 75,   0,   0,
+                                                                0,   0,   0,   0, 60,   0,
+                                                                0,   0,   0,   0,   0,  15).finished();
 
     Eigen::Matrix<double, 6, 6> D =  (Eigen::MatrixXd(6,6) <<  35,   0,   0,   0,   0,   0,
                                                                 0,  35,   0,   0,   0,   0,
@@ -174,7 +195,7 @@ public:
     Eigen::Matrix<double, 6, 1> error;                                                       // pose error (6d)
     double nullspace_stiffness_{0.001};
     double nullspace_stiffness_target_{0.001};
-    double D_gain = 2.05;
+    double D_gain = 2.;
 
     //Logging
     int outcounter = 0;

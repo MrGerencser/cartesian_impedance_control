@@ -27,6 +27,7 @@ find_package(generate_parameter_library)
 find_package(std_msgs REQUIRED)
 find_package(messages_fr3 REQUIRED)
 find_package(rclcpp_action REQUIRED)
+find_package(std_srvs REQUIRED)
 
 
 add_library(
@@ -52,6 +53,7 @@ ament_target_dependencies(
         franka_semantic_components
         std_msgs
         messages_fr3
+        std_srvs
 )
 
 

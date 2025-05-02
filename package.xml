@@ -16,6 +16,10 @@
   <depend>franka_msgs</depend>
   <depend>franka_semantic_components</depend>
   <depend>messages_fr3</depend>
+  <depend>std_srvs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+
 
 
   <exec_depend>franka_description</exec_depend>

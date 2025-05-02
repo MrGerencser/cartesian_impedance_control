@@ -18,7 +18,9 @@
 #include <cmath>
 #include <exception>
 #include <string>
-#include <numeric>
+#include <functional> // Required for std::bind
+#include <algorithm>  // Required for std::clamp
+
 
 #include <Eigen/Eigen>
 
@@ -34,84 +36,11 @@ std::ostream& operator<<(std::ostream& ostream, const std::array<T, N>& array) {
 }
 }
 
+// Here we implement the controller
 namespace cartesian_impedance_control {
 
-  void CartesianImpedanceController::objectPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-    latest_object_pose_ = *msg;
-    has_received_object_pose_ = true;
-    
-    if (following_object_) {
-        // Get workspace bounds from parameters
-        double x_min = get_node()->get_parameter("workspace_bounds.x_min").as_double();
-        double x_max = get_node()->get_parameter("workspace_bounds.x_max").as_double();
-        double y_min = get_node()->get_parameter("workspace_bounds.y_min").as_double();
-        double y_max = get_node()->get_parameter("workspace_bounds.y_max").as_double();
-        double z_min = get_node()->get_parameter("workspace_bounds.z_min").as_double();
-        double z_max = get_node()->get_parameter("workspace_bounds.z_max").as_double();
-        
-        
-        // Safe position within workspace bounds
-        double safe_x = std::max(x_min, std::min(x_max, msg->pose.position.x));
-        double safe_y = std::max(y_min, std::min(y_max, msg->pose.position.y));
-        double safe_z = std::max(z_min, std::min(z_max, msg->pose.position.z + 0.05));
-        
-      
-      // Get current position for distance calculation
-      std::array<double, 16> current_pose = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
-      Eigen::Affine3d current_transform(Eigen::Matrix4d::Map(current_pose.data()));
-      Eigen::Vector3d current_position = current_transform.translation();
-      
-      // Calculate distance between current and target position
-      double distance = std::sqrt(
-          std::pow(safe_x - current_position.x(), 2) +
-          std::pow(safe_y - current_position.y(), 2) +
-          std::pow(safe_z - current_position.z(), 2)
-      );
-      
-      // Log if position was clamped to workspace
-      if (safe_x != msg->pose.position.x || safe_y != msg->pose.position.y || 
-          safe_z != msg->pose.position.z + 0.05) {
-          RCLCPP_WARN(get_node()->get_logger(), 
-              "Target position outside workspace bounds, limiting to safe region: [%.3f, %.3f, %.3f]",
-              safe_x, safe_y, safe_z);
-      }
-      
-      // Update target position with safety measures applied
-      std::lock_guard<std::mutex> lock(position_and_orientation_d_target_mutex_);
-      position_d_target_ = Eigen::Vector3d(safe_x, safe_y, safe_z);
-      
-      // Convert quaternion to rotation for target orientation
-      Eigen::Quaterniond q(
-          msg->pose.orientation.w,
-          msg->pose.orientation.x,
-          msg->pose.orientation.y,
-          msg->pose.orientation.z);
-      
-      // Use quaternion directly instead of Euler angles
-      orientation_d_target_ = q;
-  }
-}
-
-void CartesianImpedanceController::toggleObjectFollowing(
-  const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
-  std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
-  
-  following_object_ = request->data;
-  
-  if (following_object_) {
-      if (!has_received_object_pose_) {
-          response->success = false;
-          RCLCPP_WARN(get_node()->get_logger(), "Attempted to follow object but no pose received");
-          return;
-      }
-      
-      RCLCPP_INFO(get_node()->get_logger(), "Object following enabled");
-      response->success = true;
-  } else {
-      RCLCPP_INFO(get_node()->get_logger(), "Object following disabled");
-      response->success = true;
-  }
-}
+// Add this using declaration for placeholders
+using std::placeholders::_1;
 
 void CartesianImpedanceController::update_stiffness_and_references(){
   //target by filtering
@@ -120,26 +49,6 @@ void CartesianImpedanceController::update_stiffness_and_references(){
   //D = filter_params_ * cartesian_damping_target_ + (1.0 - filter_params_) * D;
   nullspace_stiffness_ = filter_params_ * nullspace_stiffness_target_ + (1.0 - filter_params_) * nullspace_stiffness_;
   //std::lock_guard<std::mutex> position_d_target_mutex_lock(position_and_orientation_d_target_mutex_);
-  
-  
-  if (control_act){
-    
-    // orientation_d_target_ = Eigen::AngleAxisd(-M_PI/2, Eigen::Vector3d::UnitX())
-    //                     * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY())
-    //                     * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitZ());
-    
-    // save the current orientation as reference when drilling controller is activated
-    if (orientation_set == false)
-    {
-      orientation_d_target_ = orientation;
-      position_d_target_ = position;
-      orientation_set = true;
-    }
-
-    mode_ = false;
-
-  }
-
   position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
   orientation_d_ = orientation_d_.slerp(filter_params_, orientation_d_target_);
   F_contact_des = 0.05 * F_contact_target + 0.95 * F_contact_des;
@@ -220,7 +129,7 @@ controller_interface::InterfaceConfiguration CartesianImpedanceController::state
 
 
 CallbackReturn CartesianImpedanceController::on_init() {
-   UserInputServer input_server_obj(&position_d_target_, &rotation_d_target_, &K, &D, &T, &mode_,&control_act, &drill_act);
+   UserInputServer input_server_obj(&position_d_target_, &rotation_d_target_, &K, &D, &T);
    std::thread input_thread(&UserInputServer::main, input_server_obj, 0, nullptr);
    input_thread.detach();
    return CallbackReturn::SUCCESS;
@@ -231,14 +140,6 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
   franka_robot_model_ = std::make_unique<franka_semantic_components::FrankaRobotModel>(
   franka_semantic_components::FrankaRobotModel(robot_name_ + "/" + k_robot_model_interface_name,
                                                robot_name_ + "/" + k_robot_state_interface_name));
-
-  // Add these lines to your on_configure method before the try block
-  get_node()->declare_parameter("workspace_bounds.x_min", -0.25);
-  get_node()->declare_parameter("workspace_bounds.x_max", 0.75);
-  get_node()->declare_parameter("workspace_bounds.y_min", -0.5);
-  get_node()->declare_parameter("workspace_bounds.y_max", 0.5);
-  get_node()->declare_parameter("workspace_bounds.z_min", -0.05);
-  get_node()->declare_parameter("workspace_bounds.z_max", 2.0);
                                                
   try {
     rclcpp::QoS qos_profile(1); // Depth of the message queue
@@ -247,32 +148,30 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
     "franka_robot_state_broadcaster/robot_state", qos_profile, 
     std::bind(&CartesianImpedanceController::topic_callback, this, std::placeholders::_1));
     std::cout << "Succesfully subscribed to robot_state_broadcaster" << std::endl;
-
-    object_pose_subscription_ = get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
-      "/perception/object_pose", 
-      10,
-      std::bind(&CartesianImpedanceController::objectPoseCallback, this, std::placeholders::_1));
-  
-    // Initialize the toggle following service - IMPORTANT: Name must match client!
-    follow_object_service_ = get_node()->create_service<std_srvs::srv::SetBool>(
-        "toggle_object_following",  // This must match the client's service name exactly
-        std::bind(&CartesianImpedanceController::toggleObjectFollowing, this, 
-                  std::placeholders::_1, std::placeholders::_2));
-    
-    RCLCPP_INFO(get_node()->get_logger(), "Object following service initialized");
   }
 
   catch (const std::exception& e) {
     fprintf(stderr,  "Exception thrown during publisher creation at configure stage with message : %s \n",e.what());
     return CallbackReturn::ERROR;
-    }
+  }
 
-  // Initialize publisher here
-  jacobian_ee_publisher_ = get_node()->create_publisher<messages_fr3::msg::JacobianEE>("/jacobian_ee", 10);
-  dt_Fext_z_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/dt_fext_z", 10);
-  D_z_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/D_z", 10);
-  VelocityErrorPublisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/velocity_error", 10);
+  try {
+    // Create subscription for policy outputs
+    rclcpp::QoS policy_qos_profile(10);  // Buffer size of 10
+    policy_qos_profile.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
+    
+    policy_outputs_subscription_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>(
+      "/policy_outputs", policy_qos_profile,
+      std::bind(&CartesianImpedanceController::policy_outputs_callback, this, std::placeholders::_1));
+    
+    RCLCPP_INFO(get_node()->get_logger(), "Successfully subscribed to policy outputs");
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(get_node()->get_logger(), 
+      "Exception thrown during policy outputs subscription creation: %s", e.what());
+    return CallbackReturn::ERROR;
+  }
 
+  // Add parameter for policy control mode
   RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
   return CallbackReturn::SUCCESS;
 }
@@ -286,6 +185,7 @@ CallbackReturn CartesianImpedanceController::on_activate(
   Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_pose.data()));
   position_d_ = initial_transform.translation();
   orientation_d_ = Eigen::Quaterniond(initial_transform.rotation());
+  policy_joint_positions_ = {0.0, -0.569, 0.0, -2.810, 0.0, 3.037, 0.741};
   std::cout << "Completed Activation process" << std::endl;
   return CallbackReturn::SUCCESS;
 }
@@ -313,304 +213,247 @@ void CartesianImpedanceController::topic_callback(const std::shared_ptr<franka_m
   arrayToMatrix(O_F_ext_hat_K, O_F_ext_hat_K_M);
 }
 
+// This callback is called when the policy outputs are received
+// The function is called whenever a new message is published to the /policy_outputs topic
+void CartesianImpedanceController::policy_outputs_callback(
+    const std::shared_ptr<std_msgs::msg::Float64MultiArray> msg) {
+  
+  // Check if the message has at least the expected number of elements (7 joint positions)
+  if (msg->data.size() < 7) {
+    RCLCPP_ERROR(get_node()->get_logger(),
+      "Invalid policy outputs: Expected at least 7 joint values, got %zu", msg->data.size());
+    return;
+  }
+  
+  // Store the joint positions in the policy_joint_positions_ array
+  for (size_t i = 0; i < 7; ++i) {
+    policy_joint_positions_[i] = msg->data[i];
+  }
+  
+  // Set flag that we've received policy outputs
+  policy_outputs_received_ = true;
+  
+}
+
 void CartesianImpedanceController::updateJointStates() {
   for (auto i = 0; i < num_joints; ++i) {
     const auto& position_interface = state_interfaces_.at(2 * i);
     const auto& velocity_interface = state_interfaces_.at(2 * i + 1);
     assert(position_interface.get_interface_name() == "position");
     assert(velocity_interface.get_interface_name() == "velocity");
+    // Retrieve the joint position and velocity values
     q_(i) = position_interface.get_value();
     dq_(i) = velocity_interface.get_value();
   }
 }
 
-void CartesianImpedanceController::publishJacobianEE(const std::array<double, 42>& jacobian_EE, const std::array<double, 42>& jacobian_EE_derivative) {
-    messages_fr3::msg::JacobianEE jacobian_ee_msg;
-  
-    // Assign the arrays directly to the message fields
-    jacobian_ee_msg.jacobianee = jacobian_EE;
-    jacobian_ee_msg.dtjacobianee = jacobian_EE_derivative;
-  
-    // Publish the combined message
-    jacobian_ee_publisher_->publish(jacobian_ee_msg);
-}
+// The update function is called periodically by the controller manager
+// Each call of the update function corresponds to a control loop iteration
+controller_interface::return_type CartesianImpedanceController::update(const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/) {  
 
-void CartesianImpedanceController::calculate_accel_pose(double delta_time, double z_position) {
-    // Calculate the velocity
-    z_velocity = (z_position - previous_z_position_) / delta_time;
-
-    // Low-pass filter the velocity
-    z_velocity = 0.1 * z_velocity + 0.9 * previous_z_velocity_;
-
-    // Calculate acceleration before updating `previous_z_velocity_`
-    z_acceleration = (z_velocity - previous_z_velocity_) / delta_time;
-
-    // Low-pass filter the acceleration
-    z_acceleration = 0.1 * z_acceleration + 0.9 * previous_z_acceleration_;
-
-    // Update previous velocity and acceleration for the next iteration
-    previous_z_velocity_ = z_velocity;
-    previous_z_acceleration_ = z_acceleration;
-}
-
-void CartesianImpedanceController::calculate_dt_f_ext_z(double delta_time, double F_ext_z) {
-    // Calculate the dt_f_ext_z
-    dt_f_ext_z = (F_ext_z - previous_F_ext_z) / delta_time;
-
-    // Low-pass filter dt_f_ext_z
-    dt_f_ext_z = 0.1 * dt_f_ext_z + 0.9 * previous_dt_F_ext_z;
-
-    // Update previous dt_f_ext_z for the next iteration
-    previous_dt_F_ext_z = dt_f_ext_z;
-
-    // Publish the jointEEState message
-    std_msgs::msg::Float64 dt_f_ext_z_msg;
-    dt_f_ext_z_msg.data = dt_f_ext_z;
-    dt_Fext_z_publisher_->publish(dt_f_ext_z_msg);
-}
-
-controller_interface::return_type CartesianImpedanceController::update(const rclcpp::Time& /*time*/, const rclcpp::Duration& period) {  
-
+  // Get robot state data from franka_robot_model
   std::array<double, 49> mass = franka_robot_model_->getMassMatrix();
   std::array<double, 7> coriolis_array = franka_robot_model_->getCoriolisForceVector();
-  std::array<double, 42> jacobian_array =  franka_robot_model_->getZeroJacobian(franka::Frame::kEndEffector);
-  std::array<double, 42> jacobian_array_EE =  franka_robot_model_->getBodyJacobian(franka::Frame::kEndEffector);
+  std::array<double, 42> jacobian_array = franka_robot_model_->getZeroJacobian(franka::Frame::kEndEffector);
   std::array<double, 16> pose = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+  
+  // Map the arrays to Eigen matrices
   Eigen::Map<Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
   Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
   Eigen::Map<Eigen::Matrix<double, 7, 7>> M(mass.data());
   Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose.data()));
-  position = transform.translation();
-  orientation = transform.rotation();
+  Eigen::Vector3d position(transform.translation());
+  Eigen::Quaterniond orientation(transform.rotation());
   
-  double z_position = position.z();
-  double previous_z_position = z_position;
-
-  double F_ext_z = O_F_ext_hat_K_M(2);
-  double previous_F_ext_z = F_ext_z;
-
-  // Calculate the Jacobian derivative using finite differences
-  Eigen::Matrix<double, 6, 7> jacobian_EE_derivative;
-  
-  updateJointStates();
-
-  calculate_accel_pose(dt, z_position);
-
-  calculate_dt_f_ext_z(dt,F_ext_z);
-  
-  // Update previous z position for the next iteration
-  previous_z_position_ = z_position;
-
-
-  // save the position when the drill is activated
-  if (drill_act && drill_start_posistion_set == false){
-    drill_start_position = position;
-    drill_start_posistion_set = true;
-  }
-
-  // save all the velocities from start point of drilling into an array
-  if (drill_start_posistion_set && target_drill_velocity_set == false){
-    drill_velocities_.push_back(z_velocity);
-    drill_forces_.push_back(F_ext_z);
-
-    // once we have drilled 1cm take the average of the drill velocities and set this to the target velocity
-    if (drill_start_position.z() - position.z() > 0.005){
-      sum_drill_velocity_ = std::accumulate(drill_velocities_.begin(), drill_velocities_.end(), 0.0);
-      sum_drill_force_ = std::accumulate(drill_forces_.begin(), drill_forces_.end(), 0.0);
-      target_drill_force_ = sum_drill_force_ / drill_forces_.size();
-      target_dampening = target_drill_force_ / target_drill_velocity_;
-      target_drill_velocity_set = true;
-    }
-  }
-  
-  velocity_error = target_drill_velocity_ - z_velocity;
-
-  // publish velicity error
-  std_msgs::msg::Float64 velocity_error_msg;
-  velocity_error_msg.data = velocity_error;
-  VelocityErrorPublisher_->publish(velocity_error_msg);
-
-  // in free float mode we do not control the robot but to not have a jump in orientation when reactivated we set the desired orientation to the current one
-  if (mode_){
-    orientation_d_target_ = orientation;
-  } 
-  else if (!control_act){
-    orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
+  // Create rotation quaternion from euler angles
+  orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
                         * Eigen::AngleAxisd(rotation_d_target_[1], Eigen::Vector3d::UnitY())
                         * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
-  }
+  
+  // Update joint states using the state interfaces
+  updateJointStates();
 
-  if (control_act){
+  // Initialize torque vector
+  Eigen::VectorXd tau_d(7);
 
-    if(drill_position_set == false){
-      orientation_d_ = orientation;
-      position_d_ = position;
-      drill_position_set = true;
-    }
+  // --------------------------------------------------POLICY CONTROL MODE-------------------------------------------------------------------------------
+  if (true) {
     
-    if (projection_matrix_decrease_set == false){
-      
-      K_original = K;
+    // Define stiffness (kp) and damping (kd) gains
+    Eigen::Matrix<double, 7, 1> kp;
+    Eigen::Matrix<double, 7, 1> kd;
 
-      // determine relative rotation
-      relative_rotation = orientation*rotation_ref.inverse();
+    // Set joint-specific gains with the desired stiffness values [100,50,50,20,10,10,1]
+    kp(0) = 200;  // Joint 1
+    kp(1) = 200;  // Joint 2
+    kp(2) = 200;  // Joint 3
+    kp(3) = 40.0; // Joint 4
+    kp(4) = 30.0; // Joint 5
+    kp(5) = 20.0; // Joint 6
+    kp(6) = 6.0;  // Joint 7
 
-      // change to rotation matrix
-      Eigen::Matrix3d relative_rotation_matrix = relative_rotation.toRotationMatrix();
-
-      // determine the direction of the relative rotation
-      direction_current = relative_rotation_matrix * direction_ref;
-
-      direction_current.normalize();
-
-      projection_matrix_decrease.topLeftCorner(3,3) = Eigen::Matrix3d::Identity() - direction_current * direction_current.transpose();
-      projection_matrix_increase.topLeftCorner(3,3) = Eigen::Matrix3d::Identity() + K_increase_gain*(direction_current * direction_current.transpose());
-      projection_matrix_decrease.bottomRightCorner(3,3) = Eigen::Matrix3d::Identity();
-      projection_matrix_increase.bottomRightCorner(3,3) = Eigen::Matrix3d::Identity();
-
-      K.topLeftCorner(3,3) = projection_matrix_decrease.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
-      
-      projection_matrix_decrease_set = true;
-
+    // Calculate damping using the critically damped formula: kd = 2*sqrt(kp)
+    for (size_t i = 0; i < 7; ++i) {
+      kd(i) = 2 * std::sqrt(kp(i));   // Critical damping for smoother motion
     }
 
-  }
+    // Create target position vector from policy outputs with filtering
+    Eigen::Matrix<double, 7, 1> q_desired;
 
-  if (abs(dt_f_ext_z) > 5500 && control_act && accel_trigger == false) {
-    // Start the ramping process if the condition is met
-    ramping_active_ = true;       
-    position_set_ = true;
-    position_accel_lim = position - 0.01 * direction_current;   // ADAJUST TO THE POSITION IN DRILLING DIRECTION
-    accel_trigger = true;
-  }
+    // Initialize filtered targets on first run
+    if (!targets_initialized_) {
+      filtered_targets_ = q_;  // Start from the default joint positions
+      targets_initialized_ = true;
+    }
 
-  if (ramping_active_) {
-        time_constant = 0.01; // Adjust this to control the response speed
-        alpha = 1.0 - exp(-period.seconds() / time_constant);
+    // Apply filtering to smooth target transitions
+    double max_delta = 0.1;  // [rad] ~1.72 degrees
+    
+    // Calculate the filtered target positions
+    for (size_t i = 0; i < 7; ++i) {
+      // Calculate the delta between policy output and filtered target, policy_joint_positions_ is the target from the policy and filtered_targets_ is the previous target
+      double delta = policy_joint_positions_[i] - filtered_targets_(i);
 
-        // Calculate the target stiffness value
-        target_K = projection_matrix_increase.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
-        
-        // Gradually increase K.diagonal()[2] towards the target value
-        K.topLeftCorner(3,3) = alpha * target_K + (1.0 - alpha) * K.topLeftCorner(3,3);
+      // Clamp the delta to the maximum allowable range
+      delta = std::clamp(delta, -max_delta, max_delta);
 
-        // Stop ramping once we reach the target value
-        if (K.topLeftCorner(3, 3).isApprox(target_K, 1e-6)) {
-            K.topLeftCorner(3,3) = target_K;
-            elapsed_time += period.seconds();
-        }
+      // Update the filtered target with the clamped delta -> q_desired_t = q_desired_t-1 + alpha*delta
+      filtered_targets_(i) = filtered_targets_(i) + filter_factor_ * delta;
+    }
 
-        if (elapsed_time > 3.0) {
-          // Reset the ramping process after 5 seconds
-          ramping_active_ = false;
-          accel_trigger = false;
-          elapsed_time = 0.0;
-          K.topLeftCorner(3,3) = projection_matrix_decrease.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
-          position_set_ = false;
-          position_d_ = position;
-        }
+    // Set the desired joint position (always use the latest filtered_targets_)
+    q_desired = filtered_targets_;
+
+    // Compute joint position error, q_ is the current joint position obtained from the robot state
+    Eigen::Matrix<double, 7, 1> position_error = q_desired - q_;
+
+    // Calculate joint torques using PD control law with gravity compensation
+    // tau = kp * (q* - q) - kd * q_dot + coriolis
+    tau_d = kp.cwiseProduct(position_error) - kd.cwiseProduct(dq_) + coriolis;
+
+    // Debug output for policy control mode
+    if (outcounter % 100 == 0) {  // Log every 100 iterations
+      RCLCPP_INFO(get_node()->get_logger(), "==== RL Policy Control Mode ====");
+      // Log Policy Targets (raw)
+      RCLCPP_INFO(get_node()->get_logger(), "Policy Targets (raw): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+            policy_joint_positions_[0], policy_joint_positions_[1], policy_joint_positions_[2],
+            policy_joint_positions_[3], policy_joint_positions_[4], policy_joint_positions_[5],
+            policy_joint_positions_[6]);
+
+      // Log Filtered/Desired Positions
+      RCLCPP_INFO(get_node()->get_logger(), "Desired Positions (filtered): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+            q_desired(0), q_desired(1), q_desired(2), q_desired(3), q_desired(4), q_desired(5), q_desired(6));
+
+      // Log Current Positions
+      RCLCPP_INFO(get_node()->get_logger(), "Current Positions: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+            q_(0), q_(1), q_(2), q_(3), q_(4), q_(5), q_(6));
+
+      // Log Position Error
+      RCLCPP_INFO(get_node()->get_logger(), "Position Error: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+            position_error(0), position_error(1), position_error(2), position_error(3),
+            position_error(4), position_error(5), position_error(6));
+
+      // Log Current Velocities
+      RCLCPP_INFO(get_node()->get_logger(), "Current Velocities: [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+            dq_(0), dq_(1), dq_(2), dq_(3), dq_(4), dq_(5), dq_(6));
+
+       // Log Calculated Torques (before saturation)
+      RCLCPP_INFO(get_node()->get_logger(), "Calculated Torques (PD+C): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+            tau_d(0), tau_d(1), tau_d(2), tau_d(3), tau_d(4), tau_d(5), tau_d(6));
+
+      RCLCPP_INFO(get_node()->get_logger(), "==========================");
+    }
+
   } 
 
-  if (position_set_){
-      position_d_ = position_accel_lim; // setting breakthrough position
-      D_gain = 2.05;
-  }
+  // -------------------------------------------ORIGINAL CARTESIAN IMPEDANCE CONTROL MODE---------------------------------------------------------
+  else {
+    // Calculate cartesian error
 
-  error.head(3) << position - position_d_;
+    // Position error
+    error.head(3) << position - position_d_;
 
-  if (orientation_d_.coeffs().dot(orientation.coeffs()) < 0.0) {
-    orientation.coeffs() << -orientation.coeffs();
-  }
-  Eigen::Quaterniond error_quaternion(orientation.inverse() * orientation_d_);
-  error.tail(3) << error_quaternion.x(), error_quaternion.y(), error_quaternion.z();
-  error.tail(3) << -transform.rotation() * error.tail(3);
+    //Orientation error
+    if (orientation_d_.coeffs().dot(orientation.coeffs()) < 0.0) {
+      orientation.coeffs() << -orientation.coeffs();
+    }
+    Eigen::Quaterniond error_quaternion(orientation.inverse() * orientation_d_);
+    error.tail(3) << error_quaternion.x(), error_quaternion.y(), error_quaternion.z();
+    error.tail(3) << -transform.rotation() * error.tail(3);
+    
+    // Calculate error integral for pose
+    I_error += Sm * dt * integrator_weights.cwiseProduct(error);
+    // Limit integral error to avoid windup
+    for (int i = 0; i < 6; i++){
+      I_error(i,0) = std::min(std::max(-max_I(i,0), I_error(i,0)), max_I(i,0)); 
+    }
 
-  Lambda = (jacobian * M.inverse() * jacobian.transpose()).inverse();
-  // Theta = T*Lambda;
-  // F_impedance = -1*(Lambda * Theta.inverse() - IDENTITY) * F_ext;
-  //Inertia of the robot
-  // remove the mode selection
-/*   switch (mode_)
-  {
-  case 1: */
-
+    // Calculate operational space inertia matrix
+    Lambda = (jacobian * M.inverse() * jacobian.transpose()).inverse();
+    
+    // Set Theta for impedance control
     Theta = Lambda;
 
-    // correcting D to be critically damped
-    D =  D_gain* K.cwiseMax(0.0).cwiseSqrt() * Lambda.cwiseMax(0.0).diagonal().cwiseSqrt().asDiagonal();
-
+    // Calculate critically damped damping matrix
+    D = D_gain * K.cwiseMax(0.0).cwiseSqrt() * Lambda.cwiseMax(0.0).diagonal().cwiseSqrt().asDiagonal();
+    // This creates a block diagonal structure [D_pos, 0; 0, D_rot], where D_pos and D_rot are 3x3 matrices for translational and rotational damping
     D.topRightCorner(3,3).setZero();
     D.bottomLeftCorner(3,3).setZero();
     
-    F_impedance = -1 * (D * (jacobian * dq_) + K * error /*+ I_error*/);
-/*  break;
+    // Calculate impedance force, negative sign: forces should pull towards the desired pose
+    F_impedance = -1 * (D * (jacobian * dq_) + K * error);
 
-  case 2:
-    Theta = T*Lambda;
-    F_impedance = -1*(Lambda * Theta.inverse() - IDENTITY) * F_ext;
-    break;
-  
-  default:
-    break;
-  } */
+    // Filter external force and calculate contact force error integral
+    F_ext = 0.9 * F_ext + 0.1 * O_F_ext_hat_K_M;
+    I_F_error += dt * Sf * (F_contact_des - F_ext);
+    F_cmd = Sf * (0.4 * (F_contact_des - F_ext) + 0.9 * I_F_error + 0.9 * F_contact_des);
 
-  F_ext = 0.9 * F_ext + 0.1 * O_F_ext_hat_K_M; //Filtering 
-  I_F_error += dt * Sf* (F_contact_des - F_ext);
-  F_cmd = Sf*(0.4 * (F_contact_des - F_ext) + 0.9 * I_F_error + 0.9 * F_contact_des);
+    // Calculate required torques
+    Eigen::VectorXd tau_task(7), tau_nullspace(7), tau_impedance(7);
+    pseudoInverse(jacobian.transpose(), jacobian_transpose_pinv);
 
-  Eigen::VectorXd tau_task(7), tau_nullspace(7), tau_d(7), tau_impedance(7);
-  pseudoInverse(jacobian.transpose(), jacobian_transpose_pinv);
+    // Nullspace component
+    tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) -
+                      jacobian.transpose() * jacobian_transpose_pinv) *
+                      (nullspace_stiffness_ * config_control * (q_d_nullspace_ - q_) -
+                      (2.0 * sqrt(nullspace_stiffness_)) * dq_);
 
-  tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) -
-                    jacobian.transpose() * jacobian_transpose_pinv) *
-                    (nullspace_stiffness_ * config_control * (q_d_nullspace_ - q_) - //if config_control = true we control the whole robot configuration
-                    (2.0 * sqrt(nullspace_stiffness_)) * dq_);  // if config control ) false we don't care about the joint position
+    // Impedance and force control components
+    tau_impedance = jacobian.transpose() * Sm * F_impedance + jacobian.transpose() * Sf * F_cmd;
+    
+    // Combined desired torque with coriolis compensation -> Sent to the robot
+    tau_d = tau_impedance + tau_nullspace + coriolis;
 
-  tau_impedance = jacobian.transpose() * Sm * (F_impedance /*+ F_repulsion + F_potential*/) + jacobian.transpose() * Sf * F_cmd;
-  Eigen::VectorXd tau_d_placeholder = tau_impedance + tau_nullspace + coriolis; //add nullspace and coriolis components to desired torque
-  
-  // free floating mode
-  if (mode_) {
-    tau_d_placeholder.setZero();
+    // Debug output for cartesian control mode
+    if (outcounter % 10 == 0) {  // Log every 10 iterations
+      std::cout << "F_ext_robot [N]" << std::endl;
+      std::cout << O_F_ext_hat_K << std::endl;
+      std::cout << O_F_ext_hat_K_M << std::endl;
+      std::cout << "Lambda  Theta.inv(): " << std::endl;
+      std::cout << Lambda * Theta.inverse() << std::endl;
+      std::cout << "tau_d" << std::endl;
+      std::cout << tau_d << std::endl;
+      std::cout << "--------" << std::endl;
+      std::cout << tau_nullspace << std::endl;
+      std::cout << "--------" << std::endl;
+      std::cout << tau_impedance << std::endl;
+      std::cout << "--------" << std::endl;
+      std::cout << coriolis << std::endl;
+      std::cout << "Inertia scaling [m]: " << std::endl;
+      std::cout << T << std::endl;
+    }
   }
+  // -------------------------------------------------------------------------------------------
 
-  tau_d << tau_d_placeholder;
-  tau_d << saturateTorqueRate(tau_d, tau_J_d_M);  // Saturate torque rate to avoid discontinuities
+  // Apply torque rate limiting for smooth control regardless of control mode,
+  tau_d = saturateTorqueRate(tau_d, tau_J_d_M);
   tau_J_d_M = tau_d;
 
+  // Send joint torque commands to the robot via the command interfaces
   for (size_t i = 0; i < 7; ++i) {
     command_interfaces_[i].set_value(tau_d(i));
   }
   
-  // In the update method, replace the current printing block with this:
-if (outcounter % 1000/update_frequency == 0){
-  // Option 1: Print only error information
-  std::cout << "========== Controller Error ===========" << std::endl;
-  std::cout << "Position error [m]: " << error.head(3).transpose() << std::endl;
-  std::cout << "Orientation error: " << error.tail(3).transpose() << std::endl;
-  std::cout << "Error norm: " << error.norm() << std::endl;
-  
-  // Option 2: Or add a flag to control what gets printed
-  bool print_detailed_debug = false;  // Set to true for full debug info
-  
-  if (print_detailed_debug) {
-    std::cout << "F_ext_robot [N]" << std::endl;
-    std::cout << O_F_ext_hat_K << std::endl;
-    /* std::cout << O_F_ext_hat_K_M << std::endl; */
-    /*std::cout << "Lambda  Thetha.inv(): " << std::endl;
-    std::cout << Lambda*Theta.inverse() << std::endl;
-    std::cout << "tau_d" << std::endl;
-    std::cout << tau_d << std::endl;
-    std::cout << "--------" << std::endl;
-    std::cout << tau_nullspace << std::endl;
-    std::cout << "--------" << std::endl;
-    std::cout << tau_impedance << std::endl;
-    std::cout << "--------" << std::endl;
-    std::cout << coriolis << std::endl;*/
-    /* std::cout << "Inertia scaling:\n " << std::endl;
-    std::cout << T << std::endl;
-  }
-}
   outcounter++;
   update_stiffness_and_references();
   return controller_interface::return_type::OK;

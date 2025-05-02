@@ -18,6 +18,7 @@
 #include <cmath>
 #include <exception>
 #include <string>
+#include <numeric>
 
 #include <Eigen/Eigen>
 
@@ -119,6 +120,26 @@ void CartesianImpedanceController::update_stiffness_and_references(){
   //D = filter_params_ * cartesian_damping_target_ + (1.0 - filter_params_) * D;
   nullspace_stiffness_ = filter_params_ * nullspace_stiffness_target_ + (1.0 - filter_params_) * nullspace_stiffness_;
   //std::lock_guard<std::mutex> position_d_target_mutex_lock(position_and_orientation_d_target_mutex_);
+  
+  
+  if (control_act){
+    
+    // orientation_d_target_ = Eigen::AngleAxisd(-M_PI/2, Eigen::Vector3d::UnitX())
+    //                     * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitY())
+    //                     * Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitZ());
+    
+    // save the current orientation as reference when drilling controller is activated
+    if (orientation_set == false)
+    {
+      orientation_d_target_ = orientation;
+      position_d_target_ = position;
+      orientation_set = true;
+    }
+
+    mode_ = false;
+
+  }
+
   position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
   orientation_d_ = orientation_d_.slerp(filter_params_, orientation_d_target_);
   F_contact_des = 0.05 * F_contact_target + 0.95 * F_contact_des;
@@ -199,7 +220,7 @@ controller_interface::InterfaceConfiguration CartesianImpedanceController::state
 
 
 CallbackReturn CartesianImpedanceController::on_init() {
-   UserInputServer input_server_obj(&position_d_target_, &rotation_d_target_, &K, &D, &T);
+   UserInputServer input_server_obj(&position_d_target_, &rotation_d_target_, &K, &D, &T, &mode_,&control_act, &drill_act);
    std::thread input_thread(&UserInputServer::main, input_server_obj, 0, nullptr);
    input_thread.detach();
    return CallbackReturn::SUCCESS;
@@ -246,6 +267,11 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
     return CallbackReturn::ERROR;
     }
 
+  // Initialize publisher here
+  jacobian_ee_publisher_ = get_node()->create_publisher<messages_fr3::msg::JacobianEE>("/jacobian_ee", 10);
+  dt_Fext_z_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/dt_fext_z", 10);
+  D_z_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/D_z", 10);
+  VelocityErrorPublisher_ = get_node()->create_publisher<std_msgs::msg::Float64>("/velocity_error", 10);
 
   RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
   return CallbackReturn::SUCCESS;
@@ -298,33 +324,198 @@ void CartesianImpedanceController::updateJointStates() {
   }
 }
 
-controller_interface::return_type CartesianImpedanceController::update(const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/) {  
-  // if (outcounter == 0){
-  // std::cout << "Enter 1 if you want to track a desired position or 2 if you want to use free floating with optionally shaped inertia" << std::endl;
-  // std::cin >> mode_;
-  // std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-  // std::cout << "Mode selected" << std::endl;
-  // while (mode_ != 1 && mode_ != 2){
-  //   std::cout << "Invalid mode, try again" << std::endl;
-  //   std::cin >> mode_;
-  // }
-  // }
+void CartesianImpedanceController::publishJacobianEE(const std::array<double, 42>& jacobian_EE, const std::array<double, 42>& jacobian_EE_derivative) {
+    messages_fr3::msg::JacobianEE jacobian_ee_msg;
+  
+    // Assign the arrays directly to the message fields
+    jacobian_ee_msg.jacobianee = jacobian_EE;
+    jacobian_ee_msg.dtjacobianee = jacobian_EE_derivative;
+  
+    // Publish the combined message
+    jacobian_ee_publisher_->publish(jacobian_ee_msg);
+}
+
+void CartesianImpedanceController::calculate_accel_pose(double delta_time, double z_position) {
+    // Calculate the velocity
+    z_velocity = (z_position - previous_z_position_) / delta_time;
+
+    // Low-pass filter the velocity
+    z_velocity = 0.1 * z_velocity + 0.9 * previous_z_velocity_;
+
+    // Calculate acceleration before updating `previous_z_velocity_`
+    z_acceleration = (z_velocity - previous_z_velocity_) / delta_time;
+
+    // Low-pass filter the acceleration
+    z_acceleration = 0.1 * z_acceleration + 0.9 * previous_z_acceleration_;
+
+    // Update previous velocity and acceleration for the next iteration
+    previous_z_velocity_ = z_velocity;
+    previous_z_acceleration_ = z_acceleration;
+}
+
+void CartesianImpedanceController::calculate_dt_f_ext_z(double delta_time, double F_ext_z) {
+    // Calculate the dt_f_ext_z
+    dt_f_ext_z = (F_ext_z - previous_F_ext_z) / delta_time;
+
+    // Low-pass filter dt_f_ext_z
+    dt_f_ext_z = 0.1 * dt_f_ext_z + 0.9 * previous_dt_F_ext_z;
+
+    // Update previous dt_f_ext_z for the next iteration
+    previous_dt_F_ext_z = dt_f_ext_z;
+
+    // Publish the jointEEState message
+    std_msgs::msg::Float64 dt_f_ext_z_msg;
+    dt_f_ext_z_msg.data = dt_f_ext_z;
+    dt_Fext_z_publisher_->publish(dt_f_ext_z_msg);
+}
+
+controller_interface::return_type CartesianImpedanceController::update(const rclcpp::Time& /*time*/, const rclcpp::Duration& period) {  
+
   std::array<double, 49> mass = franka_robot_model_->getMassMatrix();
   std::array<double, 7> coriolis_array = franka_robot_model_->getCoriolisForceVector();
   std::array<double, 42> jacobian_array =  franka_robot_model_->getZeroJacobian(franka::Frame::kEndEffector);
+  std::array<double, 42> jacobian_array_EE =  franka_robot_model_->getBodyJacobian(franka::Frame::kEndEffector);
   std::array<double, 16> pose = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
   Eigen::Map<Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
   Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
   Eigen::Map<Eigen::Matrix<double, 7, 7>> M(mass.data());
   Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose.data()));
-  Eigen::Vector3d position(transform.translation());
-  Eigen::Quaterniond orientation(transform.rotation());
-  orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
+  position = transform.translation();
+  orientation = transform.rotation();
+  
+  double z_position = position.z();
+  double previous_z_position = z_position;
+
+  double F_ext_z = O_F_ext_hat_K_M(2);
+  double previous_F_ext_z = F_ext_z;
+
+  // Calculate the Jacobian derivative using finite differences
+  Eigen::Matrix<double, 6, 7> jacobian_EE_derivative;
+  
+  updateJointStates();
+
+  calculate_accel_pose(dt, z_position);
+
+  calculate_dt_f_ext_z(dt,F_ext_z);
+  
+  // Update previous z position for the next iteration
+  previous_z_position_ = z_position;
+
+
+  // save the position when the drill is activated
+  if (drill_act && drill_start_posistion_set == false){
+    drill_start_position = position;
+    drill_start_posistion_set = true;
+  }
+
+  // save all the velocities from start point of drilling into an array
+  if (drill_start_posistion_set && target_drill_velocity_set == false){
+    drill_velocities_.push_back(z_velocity);
+    drill_forces_.push_back(F_ext_z);
+
+    // once we have drilled 1cm take the average of the drill velocities and set this to the target velocity
+    if (drill_start_position.z() - position.z() > 0.005){
+      sum_drill_velocity_ = std::accumulate(drill_velocities_.begin(), drill_velocities_.end(), 0.0);
+      sum_drill_force_ = std::accumulate(drill_forces_.begin(), drill_forces_.end(), 0.0);
+      target_drill_force_ = sum_drill_force_ / drill_forces_.size();
+      target_dampening = target_drill_force_ / target_drill_velocity_;
+      target_drill_velocity_set = true;
+    }
+  }
+  
+  velocity_error = target_drill_velocity_ - z_velocity;
+
+  // publish velicity error
+  std_msgs::msg::Float64 velocity_error_msg;
+  velocity_error_msg.data = velocity_error;
+  VelocityErrorPublisher_->publish(velocity_error_msg);
+
+  // in free float mode we do not control the robot but to not have a jump in orientation when reactivated we set the desired orientation to the current one
+  if (mode_){
+    orientation_d_target_ = orientation;
+  } 
+  else if (!control_act){
+    orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
                         * Eigen::AngleAxisd(rotation_d_target_[1], Eigen::Vector3d::UnitY())
                         * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
-  updateJointStates(); 
+  }
 
-  
+  if (control_act){
+
+    if(drill_position_set == false){
+      orientation_d_ = orientation;
+      position_d_ = position;
+      drill_position_set = true;
+    }
+    
+    if (projection_matrix_decrease_set == false){
+      
+      K_original = K;
+
+      // determine relative rotation
+      relative_rotation = orientation*rotation_ref.inverse();
+
+      // change to rotation matrix
+      Eigen::Matrix3d relative_rotation_matrix = relative_rotation.toRotationMatrix();
+
+      // determine the direction of the relative rotation
+      direction_current = relative_rotation_matrix * direction_ref;
+
+      direction_current.normalize();
+
+      projection_matrix_decrease.topLeftCorner(3,3) = Eigen::Matrix3d::Identity() - direction_current * direction_current.transpose();
+      projection_matrix_increase.topLeftCorner(3,3) = Eigen::Matrix3d::Identity() + K_increase_gain*(direction_current * direction_current.transpose());
+      projection_matrix_decrease.bottomRightCorner(3,3) = Eigen::Matrix3d::Identity();
+      projection_matrix_increase.bottomRightCorner(3,3) = Eigen::Matrix3d::Identity();
+
+      K.topLeftCorner(3,3) = projection_matrix_decrease.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
+      
+      projection_matrix_decrease_set = true;
+
+    }
+
+  }
+
+  if (abs(dt_f_ext_z) > 5500 && control_act && accel_trigger == false) {
+    // Start the ramping process if the condition is met
+    ramping_active_ = true;       
+    position_set_ = true;
+    position_accel_lim = position - 0.01 * direction_current;   // ADAJUST TO THE POSITION IN DRILLING DIRECTION
+    accel_trigger = true;
+  }
+
+  if (ramping_active_) {
+        time_constant = 0.01; // Adjust this to control the response speed
+        alpha = 1.0 - exp(-period.seconds() / time_constant);
+
+        // Calculate the target stiffness value
+        target_K = projection_matrix_increase.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
+        
+        // Gradually increase K.diagonal()[2] towards the target value
+        K.topLeftCorner(3,3) = alpha * target_K + (1.0 - alpha) * K.topLeftCorner(3,3);
+
+        // Stop ramping once we reach the target value
+        if (K.topLeftCorner(3, 3).isApprox(target_K, 1e-6)) {
+            K.topLeftCorner(3,3) = target_K;
+            elapsed_time += period.seconds();
+        }
+
+        if (elapsed_time > 3.0) {
+          // Reset the ramping process after 5 seconds
+          ramping_active_ = false;
+          accel_trigger = false;
+          elapsed_time = 0.0;
+          K.topLeftCorner(3,3) = projection_matrix_decrease.topLeftCorner(3,3) * K_original.topLeftCorner(3,3);
+          position_set_ = false;
+          position_d_ = position;
+        }
+  } 
+
+  if (position_set_){
+      position_d_ = position_accel_lim; // setting breakthrough position
+      D_gain = 2.05;
+  }
+
   error.head(3) << position - position_d_;
 
   if (orientation_d_.coeffs().dot(orientation.coeffs()) < 0.0) {
@@ -333,10 +524,6 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   Eigen::Quaterniond error_quaternion(orientation.inverse() * orientation_d_);
   error.tail(3) << error_quaternion.x(), error_quaternion.y(), error_quaternion.z();
   error.tail(3) << -transform.rotation() * error.tail(3);
-  I_error += Sm * dt * integrator_weights.cwiseProduct(error);
-  for (int i = 0; i < 6; i++){
-    I_error(i,0) = std::min(std::max(-max_I(i,0),  I_error(i,0)), max_I(i,0)); 
-  }
 
   Lambda = (jacobian * M.inverse() * jacobian.transpose()).inverse();
   // Theta = T*Lambda;
@@ -380,7 +567,13 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
                     (2.0 * sqrt(nullspace_stiffness_)) * dq_);  // if config control ) false we don't care about the joint position
 
   tau_impedance = jacobian.transpose() * Sm * (F_impedance /*+ F_repulsion + F_potential*/) + jacobian.transpose() * Sf * F_cmd;
-  auto tau_d_placeholder = tau_impedance + tau_nullspace + coriolis; //add nullspace and coriolis components to desired torque
+  Eigen::VectorXd tau_d_placeholder = tau_impedance + tau_nullspace + coriolis; //add nullspace and coriolis components to desired torque
+  
+  // free floating mode
+  if (mode_) {
+    tau_d_placeholder.setZero();
+  }
+
   tau_d << tau_d_placeholder;
   tau_d << saturateTorqueRate(tau_d, tau_J_d_M);  // Saturate torque rate to avoid discontinuities
   tau_J_d_M = tau_d;
@@ -403,8 +596,8 @@ if (outcounter % 1000/update_frequency == 0){
   if (print_detailed_debug) {
     std::cout << "F_ext_robot [N]" << std::endl;
     std::cout << O_F_ext_hat_K << std::endl;
-    std::cout << O_F_ext_hat_K_M << std::endl;
-    std::cout << "Lambda  Thetha.inv(): " << std::endl;
+    /* std::cout << O_F_ext_hat_K_M << std::endl; */
+    /*std::cout << "Lambda  Thetha.inv(): " << std::endl;
     std::cout << Lambda*Theta.inverse() << std::endl;
     std::cout << "tau_d" << std::endl;
     std::cout << tau_d << std::endl;
@@ -413,8 +606,8 @@ if (outcounter % 1000/update_frequency == 0){
     std::cout << "--------" << std::endl;
     std::cout << tau_impedance << std::endl;
     std::cout << "--------" << std::endl;
-    std::cout << coriolis << std::endl;
-    std::cout << "Inertia scaling [m]: " << std::endl;
+    std::cout << coriolis << std::endl;*/
+    /* std::cout << "Inertia scaling:\n " << std::endl;
     std::cout << T << std::endl;
   }
 }

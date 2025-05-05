@@ -1,690 +1,411 @@
 #include <rclcpp/rclcpp.hpp>
-#include <messages_fr3/srv/set_pose.hpp>
-#include <messages_fr3/srv/set_param.hpp>
-#include <messages_fr3/srv/set_stiffness.hpp>
-#include <messages_fr3/srv/set_mode.hpp>
-#include <messages_fr3/srv/controller_activation.hpp>
-#include <messages_fr3/srv/planner_service.hpp>
-#include <franka_msgs/action/grasp.hpp>
-#include <franka_msgs/action/move.hpp>
-#include <rclcpp_action/rclcpp_action.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp> // Add this header
-#include <std_srvs/srv/set_bool.hpp>
+#include "messages_fr3/srv/set_pose.hpp"
+#include "messages_fr3/srv/set_param.hpp"
 
 #include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <array>
 #include <cmath>
-#include <iostream>
+#include <map>
 #include <string>
-#include <functional>
+#include <vector>
+#include <thread>
+#include <iostream>
+#include <iomanip>
 
-/**
- * FR3RobotController - A class to control the FR3 robot arm and gripper
- */
-class FR3RobotController {
+class CartesianControlClient {
 public:
-    // Constants for default positions and configurations
-    static constexpr double HOME_X = 0.5;
-    static constexpr double HOME_Y = 0.0;
-    static constexpr double HOME_Z = 0.4;
-    static constexpr double HOME_ROLL = M_PI;
-    static constexpr double HOME_PITCH = 0.0;
-    static constexpr double HOME_YAW = M_PI_2;
-    
-    static constexpr double SAFETY_Z_OFFSET = 0.05;
-    static constexpr double DEFAULT_GRASP_WIDTH = 0.04;
-    static constexpr double DEFAULT_GRASP_SPEED = 0.1;
-    static constexpr double DEFAULT_GRASP_FORCE = 10.0;
-    static constexpr double DEFAULT_INNER_EPSILON = 0.005;
-    static constexpr double DEFAULT_OUTER_EPSILON = 0.010;
-    static constexpr double DEFAULT_OPEN_WIDTH = 0.08;
-    static constexpr double DEFAULT_OPEN_SPEED = 0.1;
+    CartesianControlClient(std::shared_ptr<rclcpp::Node> node) : node_(node) {
+        // Create clients for the pose and parameter services
+        pose_client_ = node_->create_client<messages_fr3::srv::SetPose>("set_pose");
+        param_client_ = node_->create_client<messages_fr3::srv::SetParam>("set_param");
 
-    // Add this flag to track object following state
-    bool is_following_object_ = false;
-
-    /**
-     * Constructor initializes the node and all necessary clients
-     */
-    FR3RobotController(const std::shared_ptr<rclcpp::Node>& node)
-        : node_(node),
-          logger_(node->get_logger()),
-          has_received_object_pose_(false),
-          is_following_object_(false) {
-        
-        // Initialize service clients
-        pose_client_ = node->create_client<messages_fr3::srv::SetPose>("set_pose");
-        param_client_ = node->create_client<messages_fr3::srv::SetParam>("set_param");
-        mode_client_ = node->create_client<messages_fr3::srv::SetMode>("set_mode");
-        activation_client_ = node->create_client<messages_fr3::srv::ControllerActivation>("controller_activation");
-        stiffness_client_ = node->create_client<messages_fr3::srv::SetStiffness>("set_stiffness");
-        planner_client_ = node->create_client<messages_fr3::srv::PlannerService>("planner_service");
-        
-        // Initialize action clients
-        gripper_grasp_client_ = rclcpp_action::create_client<franka_msgs::action::Grasp>(node, "/fr3_gripper/grasp");
-        gripper_move_client_ = rclcpp_action::create_client<franka_msgs::action::Move>(node, "/fr3_gripper/move");
-        
-        // Initialize requests
-        pose_request_ = std::make_shared<messages_fr3::srv::SetPose::Request>();
-        param_request_ = std::make_shared<messages_fr3::srv::SetParam::Request>();
-        mode_request_ = std::make_shared<messages_fr3::srv::SetMode::Request>();
-        activation_request_ = std::make_shared<messages_fr3::srv::ControllerActivation::Request>();
-        stiffness_request_ = std::make_shared<messages_fr3::srv::SetStiffness::Request>();
-        planner_request_ = std::make_shared<messages_fr3::srv::PlannerService::Request>();
-        
-        // Subscribe to object pose topic
-        object_pose_subscription_ = node->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "/perception/object_pose", 10, 
-            std::bind(&FR3RobotController::objectPoseCallback, this, std::placeholders::_1));
-        
         // Wait for services to be available
-        waitForServices();
+        while (!pose_client_->wait_for_service(std::chrono::seconds(1))) {
+            if (!rclcpp::ok()) {
+                RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for pose service");
+                return;
+            }
+            RCLCPP_INFO(node_->get_logger(), "Waiting for pose service...");
+        }
+
+        while (!param_client_->wait_for_service(std::chrono::seconds(1))) {
+            if (!rclcpp::ok()) {
+                RCLCPP_ERROR(node_->get_logger(), "Interrupted while waiting for param service");
+                return;
+            }
+            RCLCPP_INFO(node_->get_logger(), "Waiting for param service...");
+        }
+
+        RCLCPP_INFO(node_->get_logger(), "Services are available!");
+
+        // Initialize predefined poses [x, y, z, roll, pitch, yaw]
+        predefined_poses_["home"] = {0.5, 0.0, 0.4, M_PI, 0.0, 0.0};
+        predefined_poses_["left"] = {0.5, -0.3, 0.5, M_PI, 0.0, 0.0};
+        predefined_poses_["right"] = {0.5, 0.3, 0.5, M_PI, 0.0, 0.0};
+        predefined_poses_["forward"] = {0.7, 0.0, 0.5, M_PI, 0.0, 0.0};
+        predefined_poses_["backward"] = {0.3, 0.0, 0.5, M_PI, 0.0, 0.0};
+        predefined_poses_["up"] = {0.5, 0.0, 0.7, M_PI, 0.0, 0.0};
+        predefined_poses_["down"] = {0.5, 0.0, 0.3, M_PI, 0.0, 0.0};
+        predefined_poses_["rotate_x"] = {0.5, 0.0, 0.5, M_PI + 0.3, 0.0, M_PI_2};
+        predefined_poses_["rotate_y"] = {0.5, 0.0, 0.5, M_PI, 0.3, M_PI_2};
+        predefined_poses_["rotate_z"] = {0.5, 0.0, 0.5, M_PI, 0.0, M_PI_2 + 0.3};
+
+        // Initialize predefined parameter sets [a, b, c, d, e, f]
+        predefined_params_["stiff"] = {2.0, 0.5, 0.5, 2.0, 0.5, 0.5};
+        predefined_params_["soft"] = {0.5, 0.2, 0.2, 0.5, 0.2, 0.2};
+        predefined_params_["medium"] = {1.0, 0.3, 0.3, 1.0, 0.3, 0.3};
+        predefined_params_["custom1"] = {1.5, 0.4, 0.4, 1.5, 0.4, 0.4};
+        predefined_params_["custom2"] = {2.5, 0.6, 0.6, 2.5, 0.6, 0.6};
+
+        // Initialize sequences
+        sequences_["square"] = {"home", "left", "forward", "right", "home"};
+        sequences_["triangle"] = {"home", "left", "right", "home"};
+        sequences_["updown"] = {"home", "up", "down", "home"};
+        sequences_["rotate"] = {"home", "rotate_x", "home", "rotate_y", "home", "rotate_z", "home"};
     }
 
-    /**
-     * Run the main control loop
-     */
-    void run() {
-        while (rclcpp::ok()) {
-            // Process any pending callbacks
-            rclcpp::spin_some(node_);
-            
-            displayMenu();
-            
-            int task_selection;
-            if (!(std::cin >> task_selection)) {
-                RCLCPP_ERROR(logger_, "Invalid input. Please enter a number.");
-                std::cin.clear();
-                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-                continue;
+    bool send_pose(double x, double y, double z, double roll, double pitch, double yaw) {
+        auto request = std::make_shared<messages_fr3::srv::SetPose::Request>();
+        request->x = x;
+        request->y = y;
+        request->z = z;
+        request->roll = roll;
+        request->pitch = pitch;
+        request->yaw = yaw;
+
+        RCLCPP_INFO(node_->get_logger(), "Sending pose: x=%.2f, y=%.2f, z=%.2f, roll=%.2f, pitch=%.2f, yaw=%.2f",
+                   x, y, z, roll, pitch, yaw);
+
+        auto result = pose_client_->async_send_request(request);
+        
+        if (rclcpp::spin_until_future_complete(node_, result) == rclcpp::FutureReturnCode::SUCCESS) {
+            RCLCPP_INFO(node_->get_logger(), "Pose sent successfully: %d", result.get()->success);
+            return true;
+        } else {
+            RCLCPP_ERROR(node_->get_logger(), "Failed to call service setPose");
+            return false;
+        }
+    }
+
+    bool send_param(double a, double b, double c, double d, double e, double f) {
+        auto request = std::make_shared<messages_fr3::srv::SetParam::Request>();
+        request->a = a;
+        request->b = b;
+        request->c = c;
+        request->d = d;
+        request->e = e;
+        request->f = f;
+
+        RCLCPP_INFO(node_->get_logger(), "Sending parameters: a=%.2f, b=%.2f, c=%.2f, d=%.2f, e=%.2f, f=%.2f",
+                   a, b, c, d, e, f);
+
+        auto result = param_client_->async_send_request(request);
+        
+        if (rclcpp::spin_until_future_complete(node_, result) == rclcpp::FutureReturnCode::SUCCESS) {
+            RCLCPP_INFO(node_->get_logger(), "Parameters sent successfully: %d", result.get()->success);
+            return true;
+        } else {
+            RCLCPP_ERROR(node_->get_logger(), "Failed to call service setParam");
+            return false;
+        }
+    }
+
+    bool send_predefined_pose(const std::string& pose_name) {
+        if (predefined_poses_.find(pose_name) == predefined_poses_.end()) {
+            RCLCPP_ERROR(node_->get_logger(), "Unknown pose: %s", pose_name.c_str());
+            return false;
+        }
+
+        const auto& pose = predefined_poses_[pose_name];
+        RCLCPP_INFO(node_->get_logger(), "Sending predefined pose: %s", pose_name.c_str());
+        return send_pose(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5]);
+    }
+
+    bool send_predefined_param(const std::string& param_name) {
+        if (predefined_params_.find(param_name) == predefined_params_.end()) {
+            RCLCPP_ERROR(node_->get_logger(), "Unknown parameter set: %s", param_name.c_str());
+            return false;
+        }
+
+        const auto& params = predefined_params_[param_name];
+        RCLCPP_INFO(node_->get_logger(), "Sending predefined parameters: %s", param_name.c_str());
+        return send_param(params[0], params[1], params[2], params[3], params[4], params[5]);
+    }
+
+    bool execute_sequence(const std::string& sequence_name, double delay_seconds = 2.0) {
+        if (sequences_.find(sequence_name) == sequences_.end()) {
+            RCLCPP_ERROR(node_->get_logger(), "Unknown sequence: %s", sequence_name.c_str());
+            return false;
+        }
+
+        RCLCPP_INFO(node_->get_logger(), "Executing sequence: %s", sequence_name.c_str());
+        const auto& sequence = sequences_[sequence_name];
+
+        for (const auto& pose_name : sequence) {
+            bool success = send_predefined_pose(pose_name);
+            if (!success) {
+                RCLCPP_ERROR(node_->get_logger(), "Sequence failed at pose: %s", pose_name.c_str());
+                return false;
             }
-            
-            switch (task_selection) {
-                case 1:
-                    getSafePositionFromUser();
-                    break;
-                case 2:
-                    moveToPosition();
-                    break;
-                case 3:
-                    graspObject();
-                    break;
-                case 4:
-                    moveToHomePosition();
-                    break;
-                case 5:
-                    openGripper();
-                    break;
-                case 6:
-                    moveToObjectPose();
-                    break;
-                case 7:
-                    toggleObjectFollowing();
-                    break;
-                case 0:
-                    is_following_object_ = false; // Make sure to stop following before exiting
-                    return; // Exit the loop
-                default:
-                    RCLCPP_WARN(logger_, "Invalid selection. Please try again.");
-                    break;
+            std::this_thread::sleep_for(std::chrono::duration<double>(delay_seconds));
+        }
+
+        RCLCPP_INFO(node_->get_logger(), "Sequence %s completed successfully", sequence_name.c_str());
+        return true;
+    }
+
+    bool execute_circular_motion(double center_x = 0.5, double center_y = 0.0, double center_z = 0.5,
+                                double radius = 0.1, int steps = 8, const std::string& plane = "xy") {
+        RCLCPP_INFO(node_->get_logger(), "Executing circular motion in %s plane with radius %.2f",
+                   plane.c_str(), radius);
+
+        // Default orientation
+        double roll = M_PI, pitch = 0.0, yaw = M_PI_2;
+
+        for (int i = 0; i <= steps; ++i) {  // +1 to close the circle
+            double angle = 2.0 * M_PI * i / steps;
+            double x = center_x, y = center_y, z = center_z;
+
+            if (plane == "xy") {
+                x = center_x + radius * std::cos(angle);
+                y = center_y + radius * std::sin(angle);
+            } else if (plane == "xz") {
+                x = center_x + radius * std::cos(angle);
+                z = center_z + radius * std::sin(angle);
+            } else if (plane == "yz") {
+                y = center_y + radius * std::cos(angle);
+                z = center_z + radius * std::sin(angle);
+            } else {
+                RCLCPP_ERROR(node_->get_logger(), "Unknown plane: %s", plane.c_str());
+                return false;
             }
-            
-            // Process any pending callbacks again
-            rclcpp::spin_some(node_);
+
+            bool success = send_pose(x, y, z, roll, pitch, yaw);
+            if (!success) {
+                RCLCPP_ERROR(node_->get_logger(), "Circular motion failed at step %d", i);
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
+        RCLCPP_INFO(node_->get_logger(), "Circular motion completed successfully");
+        return true;
+    }
+
+    bool interpolate_poses(const std::string& start_pose_name, const std::string& end_pose_name,
+                         int steps = 10, double delay_seconds = 0.5) {
+        if (predefined_poses_.find(start_pose_name) == predefined_poses_.end() ||
+            predefined_poses_.find(end_pose_name) == predefined_poses_.end()) {
+            RCLCPP_ERROR(node_->get_logger(), "Unknown pose name");
+            return false;
+        }
+
+        const auto& start_pose = predefined_poses_[start_pose_name];
+        const auto& end_pose = predefined_poses_[end_pose_name];
+
+        RCLCPP_INFO(node_->get_logger(), "Interpolating from %s to %s",
+                   start_pose_name.c_str(), end_pose_name.c_str());
+
+        for (int i = 0; i <= steps; ++i) {
+            double t = static_cast<double>(i) / steps;
+            std::array<double, 6> interpolated_pose;
+
+            for (size_t j = 0; j < 6; ++j) {
+                interpolated_pose[j] = start_pose[j] + t * (end_pose[j] - start_pose[j]);
+            }
+
+            bool success = send_pose(
+                interpolated_pose[0], interpolated_pose[1], interpolated_pose[2],
+                interpolated_pose[3], interpolated_pose[4], interpolated_pose[5]
+            );
+
+            if (!success) {
+                RCLCPP_ERROR(node_->get_logger(), "Interpolation failed at step %d", i);
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::duration<double>(delay_seconds));
+        }
+
+        RCLCPP_INFO(node_->get_logger(), "Interpolation completed successfully");
+        return true;
+    }
+
+    void list_available_options() {
+        std::cout << "\n=== Available Options ===" << std::endl;
+        
+        std::cout << "Predefined poses:" << std::endl;
+        for (const auto& [name, pose] : predefined_poses_) {
+            std::cout << "  " << std::left << std::setw(10) << name << ": [";
+            for (size_t i = 0; i < pose.size(); ++i) {
+                std::cout << std::fixed << std::setprecision(2) << pose[i];
+                if (i < pose.size() - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+        }
+        
+        std::cout << "\nPredefined parameter sets:" << std::endl;
+        for (const auto& [name, params] : predefined_params_) {
+            std::cout << "  " << std::left << std::setw(10) << name << ": [";
+            for (size_t i = 0; i < params.size(); ++i) {
+                std::cout << std::fixed << std::setprecision(2) << params[i];
+                if (i < params.size() - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+        }
+        
+        std::cout << "\nSequences:" << std::endl;
+        for (const auto& [name, seq] : sequences_) {
+            std::cout << "  " << std::left << std::setw(10) << name << ": [";
+            for (size_t i = 0; i < seq.size(); ++i) {
+                std::cout << seq[i];
+                if (i < seq.size() - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
         }
     }
 
 private:
-    // Node and logger
     std::shared_ptr<rclcpp::Node> node_;
-    rclcpp::Logger logger_;
-    
-    // Service clients
     rclcpp::Client<messages_fr3::srv::SetPose>::SharedPtr pose_client_;
     rclcpp::Client<messages_fr3::srv::SetParam>::SharedPtr param_client_;
-    rclcpp::Client<messages_fr3::srv::SetMode>::SharedPtr mode_client_;
-    rclcpp::Client<messages_fr3::srv::ControllerActivation>::SharedPtr activation_client_;
-    rclcpp::Client<messages_fr3::srv::SetStiffness>::SharedPtr stiffness_client_;
-    rclcpp::Client<messages_fr3::srv::PlannerService>::SharedPtr planner_client_;
     
-    // Action clients
-    rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr gripper_grasp_client_;
-    rclcpp_action::Client<franka_msgs::action::Move>::SharedPtr gripper_move_client_;
-    
-    // Service requests
-    std::shared_ptr<messages_fr3::srv::SetPose::Request> pose_request_;
-    std::shared_ptr<messages_fr3::srv::SetParam::Request> param_request_;
-    std::shared_ptr<messages_fr3::srv::SetMode::Request> mode_request_;
-    std::shared_ptr<messages_fr3::srv::ControllerActivation::Request> activation_request_;
-    std::shared_ptr<messages_fr3::srv::SetStiffness::Request> stiffness_request_;
-    std::shared_ptr<messages_fr3::srv::PlannerService::Request> planner_request_;
-
-    rclcpp::Time last_pose_update_time_;
-    double min_pose_update_interval_ = 0.2;  // Minimum time between pose updates (seconds)
-    double min_position_change_ = 0.002;     // Minimum position change to trigger an update (meters)
-    double min_orientation_change_ = 0.01;   // Minimum orientation change to trigger an update (radians)
-    int consecutive_failures_ = 0;
-    const int max_consecutive_failures_ = 3;
-    
-    // Current pose
-    std::array<double, 6> current_pose_ = {HOME_X, HOME_Y, HOME_Z, HOME_ROLL, HOME_PITCH, HOME_YAW};
-
-    // Object pose subscriber
-    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr object_pose_subscription_;
-    geometry_msgs::msg::PoseStamped latest_object_pose_;
-    bool has_received_object_pose_;
-
-    
-
-    /**
-     * Wait for all services to be available
-     */
-    void waitForServices() {
-        RCLCPP_INFO(logger_, "Waiting for services...");
-        
-        bool services_available = 
-            pose_client_->wait_for_service(std::chrono::seconds(5)) &&
-            param_client_->wait_for_service(std::chrono::seconds(5)) &&
-            mode_client_->wait_for_service(std::chrono::seconds(5)) &&
-            activation_client_->wait_for_service(std::chrono::seconds(5)) &&
-            stiffness_client_->wait_for_service(std::chrono::seconds(5)) &&
-            planner_client_->wait_for_service(std::chrono::seconds(5));
-            
-        if (!services_available) {
-            RCLCPP_WARN(logger_, "Not all services are available. Some functionality may be limited.");
-        } else {
-            RCLCPP_INFO(logger_, "All services are available.");
-        }
-    }
-
-    // Add this after waitForServices() in the constructor
-    void checkAvailableServices() {
-        RCLCPP_INFO(logger_, "Available services:");
-        auto services = node_->get_node_names();
-        for (const auto& service : services) {
-            RCLCPP_INFO(logger_, "  %s", service.c_str());
-        }
-    }
-
-    /**
-     * Display the main menu
-     */
-    void displayMenu() {
-        std::cout << "\n=== FR3 Robot Control Menu ===\n"
-                  << " [1] --> Enter 6D Pose from Vision (automatically 10cm above for security)\n"
-                  << " [2] --> Move to 6D Position\n"
-                  << " [3] --> Grasp object\n"
-                  << " [4] --> Move back to home position\n"
-                  << " [5] --> Open gripper\n"
-                  << " [6] --> Move to detected object pose (no safety offset)\n"
-                  << " [7] --> " << (is_following_object_ ? "Stop" : "Start") << " following object\n"
-                  << " [0] --> Exit\n"
-                  << "Enter your choice: ";
-    }
-    
-    /**
-     * Get position from user input with safety offset
-     */
-    void getSafePositionFromUser() {
-        std::cout << "Enter your desired position and orientation (x y z roll pitch yaw):\n";
-        
-        for (auto &value : current_pose_) {
-            if (!(std::cin >> value)) {
-                RCLCPP_ERROR(logger_, "Invalid input. Using previous value.");
-                std::cin.clear();
-                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-                return;
-            }
-        }
-        
-        // Create a safe position request (10cm above target)
-        updatePoseRequest(current_pose_[0], current_pose_[1], 
-                         current_pose_[2] + SAFETY_Z_OFFSET, 
-                         current_pose_[3], current_pose_[4], current_pose_[5]);
-        
-        // Print for verification
-        printCurrentPose();
-        
-        // Send the request
-        sendPoseRequest();
-    }
-    
-    /**
-     * Move to the previously stored position
-     */
-    void moveToPosition() {
-        int choice;
-        std::cout << "Move to 6D Position:\n [1] --> Use stored position\n [2] --> Use home position\n"
-                  << "Enter your choice: ";
-        
-        if (!(std::cin >> choice)) {
-            RCLCPP_ERROR(logger_, "Invalid input. Using default.");
-            std::cin.clear();
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            choice = 2;
-        }
-        
-        if (choice == 1) {
-            // Use the stored position (without safety offset)
-            updatePoseRequest(current_pose_[0], current_pose_[1], current_pose_[2],
-                             current_pose_[3], current_pose_[4], current_pose_[5]);
-        } else {
-            // Use home position
-            updatePoseRequest(HOME_X, HOME_Y, HOME_Z, HOME_ROLL, HOME_PITCH, HOME_YAW);
-        }
-        
-        sendPoseRequest();
-    }
-    
-    /**
-     * Send a grasp command to the gripper
-     */
-    void graspObject() {
-        int choice;
-        std::cout << "Grasp object:\n [1] --> Yes\n [2] --> No\n"
-                  << "Enter your choice: ";
-        
-        if (!(std::cin >> choice) || choice != 1) {
-            RCLCPP_INFO(logger_, "Grasp canceled.");
-            std::cin.clear();
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            return;
-        }
-        
-        // Create and send grasp goal
-        auto grasp_goal = franka_msgs::action::Grasp::Goal();
-        grasp_goal.width = DEFAULT_GRASP_WIDTH;
-        grasp_goal.speed = DEFAULT_GRASP_SPEED;
-        grasp_goal.force = DEFAULT_GRASP_FORCE;
-        grasp_goal.epsilon.inner = DEFAULT_INNER_EPSILON;
-        grasp_goal.epsilon.outer = DEFAULT_OUTER_EPSILON;
-        
-        auto send_goal_options = rclcpp_action::Client<franka_msgs::action::Grasp>::SendGoalOptions();
-        
-        send_goal_options.result_callback = 
-            [this](const rclcpp_action::ClientGoalHandle<franka_msgs::action::Grasp>::WrappedResult& result) {
-                if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-                    RCLCPP_INFO(this->logger_, "Grasp succeeded!");
-                } else {
-                    RCLCPP_ERROR(this->logger_, "Grasp failed with code: %d", static_cast<int>(result.code));
-                }
-            };
-        
-        RCLCPP_INFO(logger_, "Sending grasp command...");
-        gripper_grasp_client_->async_send_goal(grasp_goal, send_goal_options);
-    }
-    
-    /**
-     * Move the robot to the home position with safety Z movement first
-     */
-    void moveToHomePosition() {
-        int choice;
-        std::cout << "Move back to home position:\n [1] --> Yes\n [2] --> No\n"
-                << "Enter your choice: ";
-        
-        if (!(std::cin >> choice) || choice != 1) {
-            RCLCPP_INFO(logger_, "Move canceled.");
-            std::cin.clear();
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            return;
-        }
-        
-        // Step 1: First move up in Z by 10cm from current position
-        RCLCPP_INFO(logger_, "Step 1: Moving up by 10cm for safety...");
-        updatePoseRequest(
-            current_pose_[0],           // Keep current X
-            current_pose_[1],           // Keep current Y
-            current_pose_[2] + 0.10,    // Current Z + 10cm
-            current_pose_[3],           // Keep current roll
-            current_pose_[4],           // Keep current pitch
-            current_pose_[5]            // Keep current yaw
-        );
-        sendPoseRequest();
-        
-        // Wait for 1 second to allow the first movement to complete
-        RCLCPP_INFO(logger_, "Waiting for safety movement to complete...");
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        
-        // Step 2: Move to the home position
-        RCLCPP_INFO(logger_, "Step 2: Moving to home position...");
-        updatePoseRequest(HOME_X, HOME_Y, HOME_Z, HOME_ROLL, HOME_PITCH, HOME_YAW);
-        sendPoseRequest();
-    }
-    
-    /**
-     * Open the gripper
-     */
-    void openGripper() {
-        int choice;
-        std::cout << "Open gripper:\n [1] --> Yes\n [2] --> No\n"
-                  << "Enter your choice: ";
-        
-        if (!(std::cin >> choice) || choice != 1) {
-            RCLCPP_INFO(logger_, "Open gripper canceled.");
-            std::cin.clear();
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            return;
-        }
-        
-        // Create and send move goal to open the gripper
-        auto move_goal = franka_msgs::action::Move::Goal();
-        move_goal.width = DEFAULT_OPEN_WIDTH;
-        move_goal.speed = DEFAULT_OPEN_SPEED;
-        
-        auto send_goal_options = rclcpp_action::Client<franka_msgs::action::Move>::SendGoalOptions();
-        
-        send_goal_options.result_callback = 
-            [this](const rclcpp_action::ClientGoalHandle<franka_msgs::action::Move>::WrappedResult& result) {
-                if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-                    RCLCPP_INFO(this->logger_, "Gripper opened successfully!");
-                } else {
-                    RCLCPP_ERROR(this->logger_, "Failed to open gripper with code: %d", static_cast<int>(result.code));
-                }
-            };
-        
-        RCLCPP_INFO(logger_, "Sending open gripper command...");
-        gripper_move_client_->async_send_goal(move_goal, send_goal_options);
-    }
-    
-    /**
-     * Move to the detected object pose
-     */
-    void moveToObjectPose() {
-        if (!has_received_object_pose_) {
-            RCLCPP_WARN(logger_, "No object pose has been received yet. Waiting for pose...");
-            
-            // Wait a bit for a pose to arrive
-            rclcpp::Time start_time = node_->now();
-            while (rclcpp::ok() && !has_received_object_pose_ && 
-                (node_->now() - start_time).seconds() < 5.0) {
-                rclcpp::spin_some(node_);
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            
-            if (!has_received_object_pose_) {
-                RCLCPP_ERROR(logger_, "Timeout waiting for object pose. Please try again later.");
-                return;
-            }
-        }
-        
-        int choice;
-        std::cout << "Move to detected object pose (with two-step approach):\n [1] --> Yes\n [2] --> No\n"
-                << "Enter your choice: ";
-        
-        if (!(std::cin >> choice) || choice != 1) {
-            RCLCPP_INFO(logger_, "Move canceled.");
-            std::cin.clear();
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            return;
-        }
-        
-        // Process any new messages that might have arrived during user input
-        RCLCPP_INFO(logger_, "Getting fresh object position...");
-        for (int i = 0; i < 10; i++) {
-            rclcpp::spin_some(node_);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        
-        // Step 1: Move to current object pose with safety offset
-        RCLCPP_INFO(logger_, "Step 1: Moving to safety position above object...");
-        moveToCurrentObjectPose(true);
-        
-        // Wait for motion to complete
-        std::cout << "Waiting for safe position move to complete..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        
-        // Process any new messages that might have arrived while moving
-        RCLCPP_INFO(logger_, "Getting updated object position for final move...");
-        for (int i = 0; i < 10; i++) {
-            rclcpp::spin_some(node_);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        
-        // Step 2: Move to the exact object pose
-        RCLCPP_INFO(logger_, "Step 2: Moving to final object position...");
-        moveToCurrentObjectPose(false);
-    }
-
-    /**
-     * Toggle object following mode
-     */
-    void toggleObjectFollowing() {
-        is_following_object_ = !is_following_object_;
-        
-        // Create a client for the toggle_object_following service
-        auto toggle_client = node_->create_client<std_srvs::srv::SetBool>("toggle_object_following");
-        auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
-        
-        if (is_following_object_) {
-            RCLCPP_INFO(logger_, "Starting to follow object. Press '7' again to stop following.");
-            request->data = true;
-            
-            // Initialize the time variable to prevent time source error
-            last_pose_update_time_ = node_->now();
-            consecutive_failures_ = 0;  // Reset failure counter
-            
-            // Move to current object pose to start following
-            if (has_received_object_pose_) {
-                moveToCurrentObjectPose(false);
-            } else {
-                RCLCPP_WARN(logger_, "No object pose received yet. Will follow when pose is detected.");
-            }
-        } else {
-            RCLCPP_INFO(logger_, "Stopped following object.");
-            request->data = false;
-        }
-        
-        // Send request to controller
-        if (toggle_client->wait_for_service(std::chrono::seconds(1))) {
-            auto future = toggle_client->async_send_request(request);
-            rclcpp::spin_until_future_complete(node_, future);
-        } else {
-            RCLCPP_WARN(logger_, "Toggle following service not available");
-        }
-    }
-
-    /**
-     * Move to the current object pose
-     * @param with_safety_offset Whether to add a safety offset in Z
-     * @param from_callback Whether this call is coming from a callback
-     */
-    void moveToCurrentObjectPose(bool with_safety_offset = false, bool from_callback = false) {
-        // Convert pose to roll, pitch, yaw
-        double roll, pitch, yaw;
-        quaternionToRPY(latest_object_pose_.pose.orientation, roll, pitch, yaw);
-        
-        // Adjust roll to make zero orientation be (pi, 0, 0) instead of (0, 0, 0)
-        roll = M_PI + roll;
-        
-        // Set z position based on whether safety offset is desired
-        double z_position = latest_object_pose_.pose.position.z;
-        if (with_safety_offset) {
-            z_position += SAFETY_Z_OFFSET;
-        }
-        
-        // Create position request
-        updatePoseRequest(
-            latest_object_pose_.pose.position.x,
-            latest_object_pose_.pose.position.y,
-            z_position,
-            roll, pitch, yaw
-        );
-        
-        // Update current_pose_ for future reference
-        current_pose_[0] = latest_object_pose_.pose.position.x;
-        current_pose_[1] = latest_object_pose_.pose.position.y;
-        current_pose_[2] = latest_object_pose_.pose.position.z;
-        current_pose_[3] = roll;
-        current_pose_[4] = pitch;
-        current_pose_[5] = yaw;
-        
-        // Print for verification
-        printCurrentPose();
-        
-        // Send the request with the from_callback parameter
-        sendPoseRequest(from_callback);
-    }
-
-    /**
-     * Callback function for object pose subscription
-     */
-    void objectPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-        // Store the new pose
-        latest_object_pose_ = *msg;
-        has_received_object_pose_ = true;
-        
-        // Convert quaternion to roll, pitch, yaw for debugging
-        double roll, pitch, yaw;
-        quaternionToRPY(msg->pose.orientation, roll, pitch, yaw);
-        
-        // Log the new pose (less frequently to reduce console spam)
-        static int log_counter = 0;
-        if (log_counter++ % 10 == 0) {
-            RCLCPP_INFO(logger_, "Received object pose: x=%.3f, y=%.3f, z=%.3f, roll=%.3f (adjusted=%.3f), pitch=%.3f, yaw=%.3f",
-                    msg->pose.position.x, msg->pose.position.y, msg->pose.position.z,
-                    roll, M_PI + roll, pitch, yaw);
-        }
-        
-        // If in following mode, check if we should update the robot position
-        if (is_following_object_) {
-            // Check if enough time has passed since the last update
-            auto current_time = node_->now();
-            if ((current_time - last_pose_update_time_).seconds() < min_pose_update_interval_) {
-                return;  // Skip this update, it's too soon
-            }
-            
-            // Check if the pose has changed enough to warrant an update
-            if (has_pose_changed_significantly()) {
-                // If we've had too many consecutive failures, temporarily pause following
-                if (consecutive_failures_ >= max_consecutive_failures_) {
-                    RCLCPP_WARN(logger_, "Too many consecutive pose request failures. Pausing following for 2 seconds.");
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                    consecutive_failures_ = 0;
-                }
-                
-                RCLCPP_INFO(logger_, "Following object - updating robot position");
-                last_pose_update_time_ = current_time;
-                moveToCurrentObjectPose(false, true);  // No safety offset in follow mode, from callback=true
-            }
-        }
-    }
-
-    /**
-     * Check if the pose has changed significantly
-     */
-    bool has_pose_changed_significantly() {
-        // If this is the first update, consider it significant
-        if (current_pose_[0] == HOME_X && current_pose_[1] == HOME_Y && current_pose_[2] == HOME_Z) {
-            return true;
-        }
-        
-        // Calculate position change
-        double position_change = std::sqrt(
-            std::pow(latest_object_pose_.pose.position.x - current_pose_[0], 2) +
-            std::pow(latest_object_pose_.pose.position.y - current_pose_[1], 2) +
-            std::pow(latest_object_pose_.pose.position.z - current_pose_[2], 2)
-        );
-        
-        // Calculate orientation change
-        double roll, pitch, yaw;
-        quaternionToRPY(latest_object_pose_.pose.orientation, roll, pitch, yaw);
-        roll = M_PI + roll;
-        
-        double orientation_change = std::sqrt(
-            std::pow(roll - current_pose_[3], 2) +
-            std::pow(pitch - current_pose_[4], 2) +
-            std::pow(yaw - current_pose_[5], 2)
-        );
-        
-        return position_change > min_position_change_ || orientation_change > min_orientation_change_;
-    }
-    
-    /**
-     * Convert quaternion to roll, pitch, yaw angles
-     */
-    void quaternionToRPY(const geometry_msgs::msg::Quaternion& q, double& roll, double& pitch, double& yaw) {
-        // Convert quaternion to Euler angles (roll, pitch, yaw)
-        // roll (x-axis rotation)
-        double sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z);
-        double cosr_cosp = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
-        roll = std::atan2(sinr_cosp, cosr_cosp);
-        
-        // pitch (y-axis rotation)
-        double sinp = 2.0 * (q.w * q.y - q.z * q.x);
-        if (std::abs(sinp) >= 1)
-            pitch = std::copysign(M_PI / 2, sinp); // use 90 degrees if out of range
-        else
-            pitch = std::asin(sinp);
-        
-        // yaw (z-axis rotation)
-        double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
-        double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
-        yaw = std::atan2(siny_cosp, cosy_cosp);
-    }
-    
-    /**
-     * Update the pose request with the given parameters
-     */
-    void updatePoseRequest(double x, double y, double z, double roll, double pitch, double yaw) {
-        pose_request_->x = x;
-        pose_request_->y = y;
-        pose_request_->z = z;
-        pose_request_->roll = roll;
-        pose_request_->pitch = pitch;
-        pose_request_->yaw = yaw;
-    }
-
-    /**
-     * Send the pose request to the robot without waiting for response
-     */
-    void sendPoseRequest(bool from_callback = false) {
-        if (!pose_client_->wait_for_service(std::chrono::milliseconds(500))) {
-            RCLCPP_ERROR(logger_, "Service not available. Cannot send pose request.");
-            return;
-        }
-        
-        RCLCPP_INFO(logger_, "Sending pose request...");
-        
-        // Fire and forget - send the request with a callback that just logs
-        auto callback = [this](rclcpp::Client<messages_fr3::srv::SetPose>::SharedFuture future) {
-            try {
-                // Log success but don't block on the future result
-                RCLCPP_INFO(this->logger_, "Pose request callback triggered");
-                consecutive_failures_ = 0;
-            } catch (const std::exception& e) {
-                // Only log errors but keep going
-                RCLCPP_WARN(this->logger_, "Exception in pose request callback: %s", e.what());
-            }
-        };
-        
-        // Send the request asynchronously and immediately return
-        pose_client_->async_send_request(pose_request_, callback);
-        
-        // Assume success and continue without waiting
-        RCLCPP_INFO(logger_, "Pose request sent, continuing without waiting for response");
-    }
-
-
-    /**
-     * Print the current pose for verification
-     */
-    void printCurrentPose() {
-        std::cout << "Current pose: x=" << current_pose_[0]
-                  << ", y=" << current_pose_[1]
-                  << ", z=" << current_pose_[2]
-                  << ", roll=" << current_pose_[3]
-                  << ", pitch=" << current_pose_[4]
-                  << ", yaw=" << current_pose_[5] << std::endl;
-    }
+    std::map<std::string, std::array<double, 6>> predefined_poses_;
+    std::map<std::string, std::array<double, 6>> predefined_params_;
+    std::map<std::string, std::vector<std::string>> sequences_;
 };
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<rclcpp::Node>("fr3_robot_controller");
-    FR3RobotController controller(node);
-    controller.run();
+    auto node = rclcpp::Node::make_shared("user_input_client");
+    CartesianControlClient client(node);
+
+    int choice = 0;
+    std::string input;
+    
+    while (rclcpp::ok()) {
+        std::cout << "\n=== Cartesian Impedance Control Client ===" << std::endl;
+        std::cout << "1. Send predefined pose" << std::endl;
+        std::cout << "2. Send custom pose" << std::endl;
+        std::cout << "3. Execute sequence" << std::endl;
+        std::cout << "4. Execute circular motion" << std::endl;
+        std::cout << "5. Interpolate between poses" << std::endl;
+        std::cout << "6. Change impedance parameters" << std::endl;
+        std::cout << "7. List available options" << std::endl;
+        std::cout << "8. Exit" << std::endl;
+        
+        std::cout << "Enter your choice: ";
+        std::cin >> choice;
+        
+        try {
+            if (choice == 1) {
+                std::cout << "Enter pose name: ";
+                std::cin >> input;
+                client.send_predefined_pose(input);
+                
+            } else if (choice == 2) {
+                double x, y, z, roll, pitch, yaw;
+                std::cout << "Enter x position: ";
+                std::cin >> x;
+                std::cout << "Enter y position: ";
+                std::cin >> y;
+                std::cout << "Enter z position: ";
+                std::cin >> z;
+                std::cout << "Enter roll (radians): ";
+                std::cin >> roll;
+                std::cout << "Enter pitch (radians): ";
+                std::cin >> pitch;
+                std::cout << "Enter yaw (radians): ";
+                std::cin >> yaw;
+                
+                client.send_pose(x, y, z, roll, pitch, yaw);
+                
+            } else if (choice == 3) {
+                std::cout << "Enter sequence name: ";
+                std::cin >> input;
+                
+                double delay;
+                std::cout << "Enter delay between poses (seconds): ";
+                std::cin >> delay;
+                
+                client.execute_sequence(input, delay);
+                
+            } else if (choice == 4) {
+                double center_x, center_y, center_z, radius;
+                int steps;
+                std::string plane;
+                
+                std::cout << "Enter center x position (default 0.5): ";
+                std::cin >> center_x;
+                std::cout << "Enter center y position (default 0.0): ";
+                std::cin >> center_y;
+                std::cout << "Enter center z position (default 0.5): ";
+                std::cin >> center_z;
+                std::cout << "Enter radius (default 0.1): ";
+                std::cin >> radius;
+                std::cout << "Enter number of steps (default 8): ";
+                std::cin >> steps;
+                std::cout << "Enter plane (xy, xz, yz, default xy): ";
+                std::cin >> plane;
+                
+                client.execute_circular_motion(center_x, center_y, center_z, radius, steps, plane);
+                
+            } else if (choice == 5) {
+                std::string start_pose, end_pose;
+                int steps;
+                double delay;
+                
+                std::cout << "Enter start pose name: ";
+                std::cin >> start_pose;
+                std::cout << "Enter end pose name: ";
+                std::cin >> end_pose;
+                std::cout << "Enter number of steps (default 10): ";
+                std::cin >> steps;
+                std::cout << "Enter delay between steps (default 0.5): ";
+                std::cin >> delay;
+                
+                client.interpolate_poses(start_pose, end_pose, steps, delay);
+                
+            } else if (choice == 6) {
+                std::cout << "Enter parameter set name or 'custom' for custom values: ";
+                std::cin >> input;
+                
+                if (input == "custom") {
+                    double a, b, c, d, e, f;
+                    std::cout << "Enter a: ";
+                    std::cin >> a;
+                    std::cout << "Enter b: ";
+                    std::cin >> b;
+                    std::cout << "Enter c: ";
+                    std::cin >> c;
+                    std::cout << "Enter d: ";
+                    std::cin >> d;
+                    std::cout << "Enter e: ";
+                    std::cin >> e;
+                    std::cout << "Enter f: ";
+                    std::cin >> f;
+                    
+                    client.send_param(a, b, c, d, e, f);
+                } else {
+                    client.send_predefined_param(input);
+                }
+                
+            } else if (choice == 7) {
+                client.list_available_options();
+                
+            } else if (choice == 8) {
+                break;
+                
+            } else {
+                std::cout << "Invalid choice, please try again" << std::endl;
+            }
+            
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << std::endl;
+        }
+    }
+
     rclcpp::shutdown();
     return 0;
 }

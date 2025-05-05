@@ -19,8 +19,6 @@
 #include <exception>
 #include <string>
 #include <functional> // Required for std::bind
-#include <algorithm>  // Required for std::clamp
-
 
 #include <Eigen/Eigen>
 

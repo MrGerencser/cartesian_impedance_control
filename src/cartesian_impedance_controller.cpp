@@ -281,14 +281,14 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     Eigen::Matrix<double, 7, 1> kp;
     Eigen::Matrix<double, 7, 1> kd;
 
-    // Set joint-specific gains with the desired stiffness values [100,50,50,20,10,10,1]
-    kp(0) = 200;  // Joint 1
-    kp(1) = 200;  // Joint 2
-    kp(2) = 200;  // Joint 3
-    kp(3) = 40.0; // Joint 4
-    kp(4) = 30.0; // Joint 5
-    kp(5) = 20.0; // Joint 6
-    kp(6) = 6.0;  // Joint 7
+    // Set joint-specific gains with the desired stiffness values
+    kp(0) = 400;  // Joint 1
+    kp(1) = 400;  // Joint 2
+    kp(2) = 400;  // Joint 3
+    kp(3) = 300; // Joint 4
+    kp(4) = 60.0; // Joint 5
+    kp(5) = 40.0; // Joint 6
+    kp(6) = 20.0;  // Joint 7
 
     // Calculate damping using the critically damped formula: kd = 2*sqrt(kp)
     for (size_t i = 0; i < 7; ++i) {

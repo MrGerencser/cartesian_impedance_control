@@ -305,7 +305,7 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     }
 
     // Apply filtering to smooth target transitions
-    double max_delta = 0.1;  // [rad] ~1.72 degrees
+    double max_delta = 0.05;  // [rad] ~1.72 degrees
     
     // Calculate the filtered target positions
     for (size_t i = 0; i < 7; ++i) {

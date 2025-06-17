@@ -1,6 +1,11 @@
 {
     "files.associations": {
-        "cassert": "cpp"
+        "cassert": "cpp",
+        "ranges": "cpp",
+        "array": "cpp",
+        "string": "cpp",
+        "string_view": "cpp",
+        "span": "cpp"
     },
     "python.autoComplete.extraPaths": [
         "/home/pdzuser/franka_ros2_ws/install/zed_pose_estimation/lib/python3.10/site-packages",

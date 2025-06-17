@@ -210,6 +210,22 @@ CallbackReturn CartesianImpedanceController::on_configure(const rclcpp_lifecycle
     return CallbackReturn::ERROR;
   }
 
+  try {
+    // Create subscription for Cartesian target poses from grasp executor
+    rclcpp::QoS cartesian_qos_profile(1);
+    cartesian_qos_profile.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
+    
+    cartesian_target_subscription_ = get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
+      "/cartesian_target_pose", cartesian_qos_profile,
+      std::bind(&CartesianImpedanceController::cartesian_target_callback, this, std::placeholders::_1));
+    
+    RCLCPP_INFO(get_node()->get_logger(), "Successfully subscribed to Cartesian target poses");
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(get_node()->get_logger(), 
+      "Exception thrown during Cartesian target subscription creation: %s", e.what());
+    return CallbackReturn::ERROR;
+  }
+
   // Add parameter for policy control mode
   if (free_movement_mode_ && policy_control_mode_) {
     RCLCPP_WARN(get_node()->get_logger(),
@@ -230,9 +246,13 @@ CallbackReturn CartesianImpedanceController::on_activate(
   std::array<double, 16> initial_pose = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
   Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_pose.data()));
   position_d_ = initial_transform.translation();
-  position_d_target_ = Eigen::Vector3d(0.453, -0.027, 0.25);
+  position_d_target_ = Eigen::Vector3d(0.45, 0.0, 0.4);
   orientation_d_ = Eigen::Quaterniond(initial_transform.rotation());
-  orientation_d_target_ = Eigen::Quaterniond(1.0, -0.003, 0.018, -0.008);
+  orientation_d_target_ = Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0);
+  
+  // Initialize quaternion target flag
+  use_quaternion_target_ = false;  // Start with Euler angle control (UserInputServer)
+  
   policy_joint_positions_ = {0.0444, -0.1894, -0.1107, -2.5148, 0.0044, 2.3775, 0.6952};
   std::cout << "Completed Activation process" << std::endl;
   return CallbackReturn::SUCCESS;
@@ -281,6 +301,23 @@ void CartesianImpedanceController::policy_outputs_callback(
   // Set flag that we've received policy outputs
   policy_outputs_received_ = true;
   
+}
+
+void CartesianImpedanceController::cartesian_target_callback(
+    const std::shared_ptr<geometry_msgs::msg::PoseStamped> msg) {
+  
+  // Update Cartesian targets
+  position_d_target_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
+  orientation_d_target_ = Eigen::Quaterniond(
+    msg->pose.orientation.w, msg->pose.orientation.x, 
+    msg->pose.orientation.y, msg->pose.orientation.z);
+
+  // Set flag to indicate we have a direct quaternion target (don't use Euler angles)
+  use_quaternion_target_ = true;
+  
+  RCLCPP_INFO(get_node()->get_logger(), 
+    "Cartesian target received: [%.3f, %.3f, %.3f]", 
+    position_d_target_(0), position_d_target_(1), position_d_target_(2));
 }
 
 void CartesianImpedanceController::trajectory_playback_callback(
@@ -340,10 +377,14 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
   Eigen::Vector3d position(transform.translation());
   Eigen::Quaterniond orientation(transform.rotation());
   
-  // Create rotation quaternion from euler angles
-  orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
-                        * Eigen::AngleAxisd(rotation_d_target_[1], Eigen::Vector3d::UnitY())
-                        * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
+  // Only create rotation quaternion from euler angles if we don't have a direct quaternion target
+  if (!use_quaternion_target_) {
+    // Create rotation quaternion from euler angles (from UserInputServer)
+    orientation_d_target_ = Eigen::AngleAxisd(rotation_d_target_[0], Eigen::Vector3d::UnitX())
+                          * Eigen::AngleAxisd(rotation_d_target_[1], Eigen::Vector3d::UnitY())
+                          * Eigen::AngleAxisd(rotation_d_target_[2], Eigen::Vector3d::UnitZ());
+  }
+  // If use_quaternion_target_ is true, orientation_d_target_ was set by cartesian_target_callback
   
   // Update joint states using the state interfaces
   updateJointStates();

@@ -93,7 +93,9 @@ public:
     bool free_movement_mode_ = false;
     bool policy_control_mode_ = false;
     bool reset_to_default_position_ = false; // Flag to trigger reset action
+    bool use_quaternion_target_ = false;  // Flag to control orientation target source
 
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr cartesian_target_subscription_ = nullptr;
     // Add policy control related members:
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr policy_outputs_subscription_ = nullptr;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr policy_resumed_publisher_; // Declare the publisher
@@ -109,6 +111,7 @@ public:
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr trajectory_playback_subscription_ = nullptr;
 
     //Functions
+    void cartesian_target_callback(const std::shared_ptr<geometry_msgs::msg::PoseStamped> msg);
     void topic_callback(const std::shared_ptr<franka_msgs::msg::FrankaRobotState> msg);
     void trajectory_playback_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
     void updateJointStates();
@@ -144,11 +147,11 @@ public:
     Eigen::Matrix<double, 6, 6> Lambda = IDENTITY;                                           // operational space mass matrix
     Eigen::Matrix<double, 6, 6> Sm = IDENTITY;                                               // task space selection matrix for positions and rotation
     Eigen::Matrix<double, 6, 6> Sf = Eigen::MatrixXd::Zero(6, 6);                            // task space selection matrix for forces
-    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 250,   0,   0,   0,   0,   0,
-                                                                0, 250,   0,   0,   0,   0,
-                                                                0,   0, 250,   0,   0,   0,  // impedance stiffness term
-                                                                0,   0,   0, 130,   0,   0,
-                                                                0,   0,   0,   0, 130,   0,
+    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 2000,   0,   0,   0,   0,   0,
+                                                                0, 2000,   0,   0,   0,   0,
+                                                                0,   0, 2000,   0,   0,   0,  // impedance stiffness term
+                                                                0,   0,   0, 60,   0,   0,
+                                                                0,   0,   0,   0, 60,   0,
                                                                 0,   0,   0,   0,   0,  10).finished();
 
     Eigen::Matrix<double, 6, 6> D =  (Eigen::MatrixXd(6,6) <<  35,   0,   0,   0,   0,   0,
@@ -219,7 +222,7 @@ public:
     bool do_logging = false;               // set if we do log values
 
     //Filter-parameters
-    double filter_params_{0.001};
+    double filter_params_{0.0005};
     int mode_ = 1;
 
     // Add policy callback:

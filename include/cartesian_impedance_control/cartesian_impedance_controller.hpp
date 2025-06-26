@@ -102,7 +102,7 @@ public:
     std::array<double, 7> policy_joint_positions_{};
     bool policy_outputs_received_ = false;
     bool targets_initialized_ = false;
-    double filter_factor_ = 0.005;
+    double filter_factor_ = 0.003; // Default 0.005
 
     // Add a new member variable for trajectory playback
     bool trajectory_playback_mode_ = false;  // Flag to enable trajectory playback mode
@@ -147,18 +147,18 @@ public:
     Eigen::Matrix<double, 6, 6> Lambda = IDENTITY;                                           // operational space mass matrix
     Eigen::Matrix<double, 6, 6> Sm = IDENTITY;                                               // task space selection matrix for positions and rotation
     Eigen::Matrix<double, 6, 6> Sf = Eigen::MatrixXd::Zero(6, 6);                            // task space selection matrix for forces
-    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 2000,   0,   0,   0,   0,   0,
-                                                                0, 2000,   0,   0,   0,   0,
-                                                                0,   0, 2000,   0,   0,   0,  // impedance stiffness term
-                                                                0,   0,   0, 60,   0,   0,
-                                                                0,   0,   0,   0, 60,   0,
+    Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 800,   0,   0,   0,   0,   0,
+                                                                0, 800,   0,   0,   0,   0,
+                                                                0,   0, 800,   0,   0,   0,  // impedance stiffness term
+                                                                0,   0,   0, 20,   0,   0,
+                                                                0,   0,   0,   0, 20,   0,
                                                                 0,   0,   0,   0,   0,  10).finished();
 
     Eigen::Matrix<double, 6, 6> D =  (Eigen::MatrixXd(6,6) <<  35,   0,   0,   0,   0,   0,
                                                                 0,  35,   0,   0,   0,   0,
                                                                 0,   0,  35,   0,   0,   0,  // impedance damping term
-                                                                0,   0,   0,   25,   0,   0,
-                                                                0,   0,   0,   0,   25,   0,
+                                                                0,   0,   0,  25,   0,   0,
+                                                                0,   0,   0,   0,  25,   0,
                                                                 0,   0,   0,   0,   0,   6).finished();
 
     // Eigen::Matrix<double, 6, 6> K =  (Eigen::MatrixXd(6,6) << 250,   0,   0,   0,   0,   0,
@@ -199,8 +199,22 @@ public:
     Eigen::Matrix<double, 6, 1> error;                                                       // pose error (6d)
     double nullspace_stiffness_{0.001};
     double nullspace_stiffness_target_{0.001};
-    double D_gain = 2.05;
+    double D_gain = 2.4;
 
+    // Joint limit parameters for Franka FR3
+    const Eigen::VectorXd q_min_ = (Eigen::VectorXd(7) << 
+        -2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973).finished();
+    const Eigen::VectorXd q_max_ = (Eigen::VectorXd(7) << 
+         2.8973,  1.7628,  2.8973, -0.0698,  2.8973,  3.7525,  2.8973).finished();
+    
+    // Joint limit avoidance parameters
+    const double limit_gain_ = 50.0;      // Gain for limit avoidance
+    const double safety_margin_ = 0.1;    // Safety margin in radians (0.1 rad ≈ 5.7 degrees)
+    const double activation_distance_ = 0.2;  // Distance at which limit avoidance starts
+
+    // Helper function for joint limit avoidance
+    Eigen::VectorXd calculateJointLimitAvoidance() const;
+    
     //Logging
     int outcounter = 0;
     const int update_frequency = 2; //frequency for update outputs
@@ -222,7 +236,7 @@ public:
     bool do_logging = false;               // set if we do log values
 
     //Filter-parameters
-    double filter_params_{0.0005};
+    double filter_params_{0.001};
     int mode_ = 1;
 
     // Add policy callback:

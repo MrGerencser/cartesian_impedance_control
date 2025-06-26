@@ -65,6 +65,27 @@ void CartesianImpedanceController::update_stiffness_and_references(){
   F_contact_des = 0.05 * F_contact_target + 0.95 * F_contact_des;
 }
 
+Eigen::VectorXd CartesianImpedanceController::calculateJointLimitAvoidance() const {
+    Eigen::VectorXd q_limit_avoidance = Eigen::VectorXd::Zero(7);
+    
+    for (int i = 0; i < 7; ++i) {
+        double distance_to_lower = q_(i) - (q_min_(i) + safety_margin_);
+        double distance_to_upper = (q_max_(i) - safety_margin_) - q_(i);
+        
+        // Repulsive force from lower limit
+        if (distance_to_lower < activation_distance_) {
+            q_limit_avoidance(i) += limit_gain_ * (activation_distance_ - distance_to_lower) / activation_distance_;
+        }
+        
+        // Repulsive force from upper limit
+        if (distance_to_upper < activation_distance_) {
+            q_limit_avoidance(i) -= limit_gain_ * (activation_distance_ - distance_to_upper) / activation_distance_;
+        }
+    }
+    
+    return q_limit_avoidance;
+}
+
 
 void CartesianImpedanceController::arrayToMatrix(const std::array<double,7>& inputArray, Eigen::Matrix<double,7,1>& resultMatrix)
 {
@@ -693,6 +714,9 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     // Set Theta for impedance control
     Theta = Lambda;
 
+    // Calculate joint limit avoidance forces
+    Eigen::VectorXd q_limit_avoidance = calculateJointLimitAvoidance();
+
     // Calculate critically damped damping matrix
     D = D_gain * K.cwiseMax(0.0).cwiseSqrt() * Lambda.cwiseMax(0.0).diagonal().cwiseSqrt().asDiagonal();
     // This creates a block diagonal structure [D_pos, 0; 0, D_rot], where D_pos and D_rot are 3x3 matrices for translational and rotational damping
@@ -711,11 +735,17 @@ controller_interface::return_type CartesianImpedanceController::update(const rcl
     Eigen::VectorXd tau_task(7), tau_nullspace(7), tau_impedance(7);
     pseudoInverse(jacobian.transpose(), jacobian_transpose_pinv);
 
-    // Nullspace component
+    // // Nullspace component
+    // tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) -
+    //                   jacobian.transpose() * jacobian_transpose_pinv) *
+    //                   (nullspace_stiffness_ * config_control * (q_d_nullspace_ - q_) -
+    //                   (2.0 * sqrt(nullspace_stiffness_)) * dq_);
+
+    // Nullspace component with joint limit avoidance
     tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) -
-                      jacobian.transpose() * jacobian_transpose_pinv) *
-                      (nullspace_stiffness_ * config_control * (q_d_nullspace_ - q_) -
-                      (2.0 * sqrt(nullspace_stiffness_)) * dq_);
+                  jacobian.transpose() * jacobian_transpose_pinv) *
+                  (nullspace_stiffness_ * config_control * (q_d_nullspace_ - q_) -
+                  (2.0 * sqrt(nullspace_stiffness_)) * dq_ + q_limit_avoidance);                
 
     // Impedance and force control components
     tau_impedance = jacobian.transpose() * Sm * F_impedance + jacobian.transpose() * Sf * F_cmd;
